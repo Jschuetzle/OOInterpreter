@@ -27,25 +27,35 @@
 ; STATE UPDATE FUNCTIONS
 ; ======================================================================
 
-
-;; obtains the location of some variable binding and the portion of the state that precedes it. This function encapsulates behavior that the get, update, and remove
-;; functions need. Therefore, it is put into one procedure, and a function argument specifies what happens when the variable is found
-(define (lookup var state action return-cont)
-  (cond
-    [(null? state)                    (error 'using-before-declaring)]
-    [(null? (variable-names state))   (lookup var
-                                              (remaining-layers state)
-                                              (lambda (v) (return-cont (cons (top-layer state) v)))
-                                              return-cont)]
-    [(eq? (front-name state) var)     (return-cont (action state))]
-    [else                             (lookup var
-                                              (remaining-state state)
-                                              (lambda (v) (return-cont (cons (list (cons (front-name state) (variable-names v))
-                                                                                   (cons (front-value state) (variable-values v)))
-                                                                             (remaining-layers v))))
-                                              return-cont)]))
+;; returns the value associated with some variable in the state. Naming conflicts are handled by the layering of the state, i.e. static
+;; scoping rules are applied to variable lookups. An error is thrown if variable doesn't exist in state or if the variable hasn't been initialized yet
+(define (get-value var state return-cont)
+    (cond
+      [(null? state)                                                            (error 'using-before-declaring)]
+      [(null? (variable-names state))                                           (get-value var (remaining-layers state) return-cont)]
+      [(and (eq? (front-name state) var) (eq? 'novalue (front-value state)))    (error 'using-before-assigning)]
+      [(eq? (front-name state) var)                                             (return-cont (front-value state))]
+      [else                                                                     (get-value var (remaining-state state) return-cont)]))
 
 
+;; returns the value associated with some variable in the state. Naming conflicts are handled by the layering of the state, i.e. static
+;; scoping rules are applied to variable lookups. An error is thrown if variable doesn't exist in state or if the variable hasn't been initialized yet
+(define (update-value var newvalue state return-cont)
+    (cond
+      [(null? state)                                                            (error 'using-before-declaring)]
+      [(null? (variable-names state))                                           (update-value var
+                                                                                              newvalue
+                                                                                              (remaining-layers state)
+                                                                                              (lambda (v) (return-cont (cons (top-layer state) v))))]
+      [(eq? (front-name state) var)                                             (return-cont (cons (list (variable-names state)
+                                                                                                         (cons newvalue (remaining-values state)))
+                                                                                                   (remaining-layers state)))]
+      [else                                                                     (update-value var
+                                                                                              newvalue
+                                                                                              (remaining-state state)
+                                                                                              (lambda (v) (return-cont (cons (list (cons (front-name state) (variable-names v))
+                                                                                                                                   (cons (front-value state) (variable-values v)))
+                                                                                                                             (remaining-layers v)))))]))
 
 
 ; adds a binding to the state
@@ -53,6 +63,15 @@
   (cons (list (cons var (variable-names state))
               (cons value (variable-values state)))
         (remaining-layers state)))
+
+
+; returns true if the variable name exists in the state
+(define (in-state? var state return-cont)
+  (cond
+    [(null? state)     (return-cont #f)]
+    [(null? (variable-names state))   (in-state? var (remaining-layers state) return-cont)]
+    [(eq? (front-name state) var)     (return-cont #t)]
+    [else                             (in-state? var (remaining-state state) return-cont)]))
 
 
 ; bool converter for M-boolean, to ensure the return is 'true or 'false (not #t or #f)
@@ -75,12 +94,7 @@
        ; expressions with no operators
        [(or (eq? expr 'true) (eq? expr 'false))   (return-cont expr)]
        [(number? expr)                            (return-cont 'error)]
-       [(and (atom? expr))                        (M-boolean (lookup expr
-                                                                     state
-                                                                     (lambda (state) (front-value state))
-                                                                     clean-return-cont)
-                                                             state
-                                                             return-cont)]
+       [(and (atom? expr))                        (M-boolean (get-value expr state clean-return-cont) state return-cont)]
        
        ; expressions with operators
        [(eq? (operator expr) '&&)        (M-boolean (leftoperand expr) state
@@ -94,29 +108,29 @@
        [(eq? (operator expr) '!)         (M-boolean (leftoperand expr) state
                                            (lambda (v) (return-cont (language-bool (not (eq? v 'true))))))]
        
-       [(eq? (operator expr) '!=)        (M-boolean (leftoperand expr) state
-                                           (lambda (v-left) (M-boolean (rightoperand expr) state
-                                             (lambda (v-right) (return-cont (language-bool (not (eq? v-right v-left))))))))]
+       [(eq? (operator expr) '!=)        (M-value (leftoperand expr) state
+                                           (lambda (v-left) (M-value (rightoperand expr) state
+                                             (lambda (v-right) (return-cont (language-bool (not (eq? v-left v-right))))))))]
        
-       [(eq? (operator expr) '==)        (M-boolean (leftoperand expr) state
-                                           (lambda (v-left) (M-boolean (rightoperand expr) state
-                                             (lambda (v-right) (return-cont (language-bool (eq? v-right v-left)))))))]
+       [(eq? (operator expr) '==)        (M-value (leftoperand expr) state
+                                           (lambda (v-left) (M-value (rightoperand expr) state
+                                             (lambda (v-right) (return-cont (language-bool (eq? v-left v-right)))))))]
        
-       [(eq? (operator expr) '<)        (M-boolean (leftoperand expr) state
-                                          (lambda (v-left) (M-boolean (rightoperand expr) state
-                                            (lambda (v-right) (return-cont (language-bool (< v-right v-left)))))))]
+       [(eq? (operator expr) '<)        (M-int (leftoperand expr) state
+                                          (lambda (v-left) (M-int (rightoperand expr) state
+                                            (lambda (v-right) (return-cont (language-bool (< v-left v-right)))))))]
        
-       [(eq? (operator expr) '<=)        (M-boolean (leftoperand expr) state
-                                           (lambda (v-left) (M-boolean (rightoperand expr) state
-                                             (lambda (v-right) (return-cont (language-bool (<= v-right v-left)))))))]
+       [(eq? (operator expr) '<=)        (M-int (leftoperand expr) state
+                                           (lambda (v-left) (M-int (rightoperand expr) state
+                                             (lambda (v-right) (return-cont (language-bool (<= v-left v-right)))))))]
        
-       [(eq? (operator expr) '>)        (M-boolean (leftoperand expr) state
-                                          (lambda (v-left) (M-boolean (rightoperand expr) state
-                                            (lambda (v-right) (return-cont (language-bool (> v-right v-left)))))))]
+       [(eq? (operator expr) '>)        (M-int (leftoperand expr) state
+                                          (lambda (v-left) (M-int (rightoperand expr) state
+                                            (lambda (v-right) (return-cont (language-bool (> v-left v-right)))))))]
        
-       [(eq? (operator expr) '>=)        (M-boolean (leftoperand expr) state
-                                           (lambda (v-left) (M-boolean (rightoperand expr) state
-                                             (lambda (v-right) (return-cont (language-bool (>= v-right v-left)))))))]
+       [(eq? (operator expr) '>=)        (M-int (leftoperand expr) state
+                                           (lambda (v-left) (M-int (rightoperand expr) state
+                                             (lambda (v-right) (return-cont (language-bool (>= v-left v-right)))))))]
        [else 'error])))
 
 
@@ -126,12 +140,7 @@
     (cond
       [(number? expr)                           (return-cont expr)]
       [(or (eq? expr 'true) (eq? expr 'false))  (return-cont 'error)]
-      [(and (atom? expr))                       (M-int (lookup expr
-                                                               state
-                                                               (lambda (state) (front-value state))
-                                                               clean-return-cont)
-                                                       state
-                                                       return-cont)]
+      [(and (atom? expr))                       (M-int (get-value expr state clean-return-cont) state return-cont)]
       
       [(and (eq? (operator expr) '-)
             (null? (operands-excluding-first expr)))      (M-int (operand expr) state
@@ -155,7 +164,8 @@
        
       [(eq? (operator expr) '%)                (M-int (leftoperand expr) state 
                                                   (lambda (v-left) (M-int (rightoperand expr) state
-                                                    (lambda (v-right) (return-cont (remainder v-left v-right))))))])))
+                                                    (lambda (v-right) (return-cont (remainder v-left v-right))))))]
+      [else                                    (return-cont 'error)])))
 
 
 ; returns the boolean or integer value that an expression evaluates to
@@ -163,7 +173,7 @@
   (lambda (expr state return-cont)
     (let ((bool-result (M-boolean expr state clean-return-cont)))
       (cond
-        [(eq? bool-result 'error)   (M-int expr state clean-return-cont)]
+        [(eq? bool-result 'error)   (M-int expr state return-cont)]
         [else                       (return-cont bool-result)]))))
 
 
@@ -171,22 +181,23 @@
 ; If a "value" is specified, the function returns the a new state with the name/value binding. Otherwise, the function returns the state with the name bound to 'novalue.
 (define M-declare
   (lambda (stmt state)
-    (cond
-      ; need to implement error detection for variable redefining in future
-      [(null? (var-dec-value stmt))   (addBinding (leftoperand stmt) 'novalue state)]
-      [else                           (addBinding (leftoperand stmt) (M-value (rightoperand stmt) state clean-return-cont) state)])))
+    (let ((in-state (in-state? (leftoperand stmt) state clean-return-cont)))
+      (cond
+        [in-state                       (error 'redefining-variable)]
+        [(null? (var-dec-value stmt))   (addBinding (leftoperand stmt) 'novalue state)]
+        [else                           (addBinding (leftoperand stmt) (M-value (rightoperand stmt) state clean-return-cont) state)]))))
 
 
 ; Takes in list of the form "(if conditional then-statement optional-else-statement)"
 ; Returns the state after execution of "then-statement" if "conditional" evaluates to 'true. Otherwise, returns state after execution of "optional-else-statement"
 (define M-if 
    (lambda (stmt state return-cont)
-     (let ((condition-result (M-boolean (condition stmt) state return-cont))
-          (side-effected-state (M-state (condition stmt) state return-cont)))
+     ;(let ((condition-result (M-boolean (condition stmt) state clean-return-cont))
+          ;(side-effected-state (M-state (condition stmt) state clean-return-cont)))
        (cond 
-         [(eq? condition-result 'true)  (M-state (first-stmt stmt) side-effected-state return-cont)]
-         [(pair? (else-if stmt))         (M-state (second-stmt stmt) side-effected-state return-cont)]
-         [else                           side-effected-state]))))
+         [(eq? (M-boolean (condition stmt) state clean-return-cont) 'true)  (M-state (first-stmt stmt) state return-cont)]
+         [(pair? (else-if stmt))                                            (M-state (second-stmt stmt) state return-cont)]
+         [else                                                              state])))
 
 
 ; Takes in list of the form "(while conditional body-statement)"
@@ -194,23 +205,22 @@
 ; the state from the final call to "body-statement" will be returned
 (define M-while
   (lambda (stmt state return-cont)
-    (let ((condition-result (M-boolean (condition stmt) state return-cont))
-          (side-effected-state (M-state (condition stmt) state return-cont)))
+    ;(let ((condition-result (M-boolean (condition stmt) state return-cont))
+          ;(side-effected-state (M-state (condition stmt) state return-cont)))
       (cond
-        [(eq? condition-result 'true)  (M-while stmt (M-state (loop-body stmt) side-effected-state) return-cont)] 
-        [else                          side-effected-state]))))
+        [(eq? (M-boolean (condition stmt) state clean-return-cont) 'true)  (M-while stmt (M-state (loop-body stmt) state return-cont) return-cont)] 
+        [else                                                              state])))
 
 
 ; Takes in list of the form "(= variable expression)"
 ; Returns the state after removing the previous name/value binding for "var" (if it existed) and adding the new (variable, value) binding, where value is what expr evaluates to
 (define (M-assign stmt state)
-  (lookup (leftoperand stmt)
-          state
-          (lambda (state) (cons (list (cons (leftoperand stmt) (variable-names state))
-                                      (cons (M-value (rightoperand stmt) state clean-return-cont) (variable-values state)))
-                                (remaining-layers state)))
-          clean-return-cont))
+  (update-value (leftoperand stmt)
+                (M-value (rightoperand stmt) state clean-return-cont)
+                state
+                clean-return-cont))
 
+                         
 ; Takes in a list from the parser that represents a single accepted statement, and calls the proper mapping function.
 ; Returns the state after the mapping function is applied
 (define M-state
@@ -224,7 +234,7 @@
 
 
 ; expected output from each of the tests
-(define answers '(150 -4 10 16 220 5 6 10 5 -39 error error error error true false true 128 12 30 11 1106 12 16 72 21 164))
+(define answers '(150 -4 10 16 220 5 6 10 5 -39 error error error error true 100 false true 128 12 30 11 1106 12 16 72 21 164))
 (define mains   '(A A A A A A C Square Square List List List List))
 
 
