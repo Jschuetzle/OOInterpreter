@@ -42,6 +42,16 @@
       [else                                                                     (get-value var (remaining-state state) return)]))
 
 
+;; returns a reference to some variable in the state, i.e. the box bound to a variable is returned
+(define (get-reference var state return)
+    (cond
+      [(null? state)                                                            (error 'using-before-declaring)]
+      [(null? (variable-names state))                                           (get-reference var (remaining-layers state) return)]
+      [(eq? (front-name state) var)                                             (return (front-value state))]
+      [else                                                                     (get-reference var (remaining-state state) return)]))
+
+
+
 ;; updates the value of a variable in the state, and returns the newly updated state
 ;; will throw an error if variable name doesn't exist in the state
 (define (update-value var newvalue original-state iter-state return)
@@ -56,6 +66,13 @@
 (define (add-binding var value state)
   (cons (list (cons var (variable-names state))
               (cons (box value) (variable-values state)))
+        (remaining-layers state)))
+
+
+;; adds a reference to the local state...identical to "add-binding" but value is not boxed bc it is already a box
+(define (add-reference var value state)
+  (cons (list (cons var (variable-names state))
+              (cons value (variable-values state)))
         (remaining-layers state)))
 
 
@@ -107,6 +124,13 @@
     (cond
       [(and (null? params) (null? args))   fstate]
       [(or (null? params) (null? args))    (error 'mismatched-parameters)]
+      [(eq? (car params) '&)               (bind-parameters (cddr params)
+                                                            (cdr args)
+                                                            (add-reference (cadr params)
+                                                                           (get-reference (car args) state clean-return-cont)
+                                                                           fstate)
+                                                            state
+                                                            throw)]
       [else                                (bind-parameters (cdr params)
                                                             (cdr args)
                                                             (add-binding (car params)
