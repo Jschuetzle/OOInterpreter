@@ -52,16 +52,27 @@
 
 
 ; calling from try
-(define try-body   (lambda (stmt) (cadr stmt)))
-(define catch-only      (lambda (stmt) (caddr stmt)))
-(define catch-and-finally (lambda (stmt) (cddr stmt)))
+(define try-body             cadr)
+(define catch-only           caddr)
+(define catch-and-finally    cddr)
 (define catch-exception-name (lambda (stmt) (caadr (caddr stmt))))
-(define finally-from-try    (lambda (stmt) (cadddr stmt)))
+(define finally-from-try     (lambda (stmt) (cadddr stmt)))
 
 ; calling from catch
-(define catch-body     (lambda (stmt) (caddar stmt)))
-(define finally-from-catch  (lambda (stmt) (cadr stmt)))
+(define catch-body          caddar)
+(define finally-from-catch  cadr)
 
 ; calling from finally
-(define finally-body (lambda (stmt) (cadr stmt)))
-(define empty-finally '(()))
+(define finally-body cadr)
+
+
+; abstractions for function defs
+(define function-name   cadr)
+(define function-params caddr)
+(define function-body   cadddr)
+(define function-args   cddr)
+
+; abstractions for function closures
+(define closure-params      car)
+(define closure-body        cadr)
+(define closure-environment caddr)

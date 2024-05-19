@@ -9,29 +9,27 @@
 (define (runcode filename)
     (interpret (parser filename)))
 
-; Root function of interpreter. Takes a parse tree as input and outputs the result of the program execution (assuminging we run main method of "class-name")
+
+;; Root function of interpreter. Takes a parse tree as input and outputs the result of the program execution (assuminging we run main method of "class-name")
 (define (interpret tree)
   (call/cc (lambda (return) (interpret-program tree '((()())) return))))
 
-; helper method for the root function "interpret"
-; recurses through all the statements in the parse tree and returns the state after execution of the source program
+
+;; Adds all the global variables and functions to the state and then executes the "main" function
+;; Hoisting is NOT implemented, therefore the main function must be at the bottom of the program.
 (define (interpret-program tree state return)
     (cond
-      [(null? tree)  (return 'void)]
-      [else          (interpret-program (cdr tree)
-                                        (call/cc (lambda (next) (M-state (car tree)
-                                                                         state
-                                                                         return
-                                                                         next
-                                                                         (lambda (s) (error 'continue-not-allowed))
-                                                                         (lambda (s) (error 'break-not-allowed))
-                                                                         (lambda (v) (error v)))))
-                                        return)]))
+      [(null? tree)   (return (M-call-value (list 'funcall 'main)  ; execution of main
+                                            state
+                                            (lambda (s) (error 'exception-thrown))))]
+      [else                                         (interpret-program
+                                                       (cdr tree)
+                                                       (call/cc (lambda (next) (M-state (car tree) state return next null null null))) 
+                                                        return)]))
 
-
-; ======================================================================
-; STATE UPDATE FUNCTIONS
-; ======================================================================
+;; ======================================================================
+;; STATE UPDATE FUNCTIONS
+;; ======================================================================
 
 ;; returns the value associated with some variable in the state. Naming conflicts are handled by the layering of the state, i.e. static
 ;; scoping rules are applied to variable lookups. An error is thrown if variable doesn't exist in state or if the variable hasn't been initialized yet
@@ -54,60 +52,122 @@
       [else                                  (update-value var newvalue original-state (remaining-state iter-state) return)]))
 
 
-; adds a binding to the state
+;; adds a binding to the local state
 (define (add-binding var value state)
   (cons (list (cons var (variable-names state))
               (cons (box value) (variable-values state)))
         (remaining-layers state)))
 
 
-; returns true if the variable name exists in the state
+;; returns true if the variable name exists in the local environment of the state
+(define (in-local-state? var state return)
+  (cond
+    [(null? (variable-names state))   (return #f)]
+    [(eq? (front-name state) var)     (return #t)]
+    [else                             (in-local-state? var (remaining-state state) return)]))
+
+
+;; returns true if the variable name exists anywhere in the state
 (define (in-state? var state return)
   (cond
-    [(null? state)     (return #f)]
+    [(null? state)                    (return #f)]
     [(null? (variable-names state))   (in-state? var (remaining-layers state) return)]
     [(eq? (front-name state) var)     (return #t)]
     [else                             (in-state? var (remaining-state state) return)]))
 
 
-; bool converter for M-boolean, to ensure the return is 'true or 'false (not #t or #f)
+;; bool converter for M-boolean, to ensure the return is 'true or 'false (not #t or #f)
 (define (language-bool bool)
     (cond
       [(eq? bool #t)     'true]
       [else              'false]))
 
 
-
 ; ======================================================================
-; DENOTATIONAL SEMANTICS FUNCTIONS
+; FUNCTION CONSTRUCTION/DESTRUCTION
 ; ======================================================================
 
-; Takes in a list from the parser that represents a single accepted statement, and calls the proper mapping function.
-; Returns the state after the mapping function is applied
+;; creates a function closure composed of...
+;;     1. a list of formal parameters
+;;     2. a body of statements to execute
+;;     3. a function that generates the active environment available during function execution (excluding the local scope)
+;; The third component is necessary in order to allow for recursion because adding the function closure to the state
+;; while we are creating the function closure is impossible
+(define (make-func-closure name params body current-state)
+    (list params
+          body
+          (lambda (future-state) (add-binding name
+                                   (get-value name future-state clean-return-cont)
+                                   current-state))))
+
+
+;; Takes a list of formal parameters and list of associated argument expressions, evaluates the argument expressions, and
+;; adds these bindings to the local state of the function to be executed
+(define (bind-parameters params args fstate state throw)
+    (cond
+      [(and (null? params) (null? args))   fstate]
+      [(or (null? params) (null? args))    (error 'mismatched-parameters)]
+      [else                                (bind-parameters (cdr params)
+                                                            (cdr args)
+                                                            (add-binding (car params)
+                                                                         (M-value (car args) state throw clean-return-cont)
+                                                                         fstate)
+                                                            state
+                                                            throw)]))
+
+
+;; ; input: a state after executing a function, and a state before the function execution occured
+;; ; output: the original state with any updating changes to active bindings after the function was executed
+;; (define (restore-state funcstate state)
+;;     (restore-state-helper funcstate state clean-return-cont))
+;; 
+;; 
+;; ; helper function for "restore-state"
+;; ; the return is a continuation to ensure cps style
+;; (define restore-state-helper
+;;   (lambda (fstate state return)
+;;     (cond
+;;       [(null? state)                                             (return state)]
+;;       [(null? (variable-names state))                            (restore-state-helper fstate (remaining-layers state) return)]
+;;       [(in-state? (front-name state) fstate clean-return-cont)   (restore-state-helper fstate (remaining-state state) return)]
+;;       [else                               (let ((new-state (update-value (front-name fstate)
+;;                                                                          (unbox (front-value fstate))
+;;                                                                          state
+;;                                                                          clean-return-cont)))
+;;                                             (restore-state-helper (remaining-state fstate) new-state return))])))
+
+
+;; ======================================================================
+;; DENOTATIONAL SEMANTICS FUNCTIONS
+;; ======================================================================
+
+;; Takes in a single accepted statement from the parse tree, and calls the proper mapping function.
+;; Returns the state after the mapping function is applied
 (define (M-state stmt state return next continue break throw)
     (cond
-      [(eq? (car stmt) 'var)        (M-declare stmt state)]
-      [(eq? (car stmt) '=)          (M-assign stmt state)]
-      [(eq? (car stmt) 'return)     (return (M-value (leftoperand stmt) state clean-return-cont))]
+      [(eq? (car stmt) 'var)        (M-declare stmt state throw)]
+      [(eq? (car stmt) '=)          (M-assign stmt state throw)]
+      [(eq? (car stmt) 'return)     (M-return (leftoperand stmt) state return throw)]
       [(eq? (car stmt) 'begin)      (M-block (cdr stmt) (add-layer state) return next continue break throw)]
+      [(eq? (car stmt) 'function)   (M-declare stmt state throw)]
+      [(eq? (car stmt) 'funcall)    (M-call-state stmt state next throw)]
       [(eq? (car stmt) 'if)         (M-if stmt state return next continue break throw)]
       [(eq? (car stmt) 'while)      (M-while stmt state return next next throw)]
       [(eq? (car stmt) 'continue)   (continue (remove-layer state))]
       [(eq? (car stmt) 'break)      (break (remove-layer state))]
-      [(eq? (car stmt) 'throw)      (M-throw stmt state throw)]
+      [(eq? (car stmt) 'throw)      (M-throw (leftoperand stmt) state throw)]
       [(eq? (car stmt) 'try)        (M-try stmt state return next continue break throw)]
       [(eq? (car stmt) 'finally)    (M-finally stmt state return next continue break throw)]
       [(eq? (caar stmt) 'catch)     (M-catch stmt state return next continue break throw)]))
 
 
-; Takes in a list of accepted statements that represents a new block of statements.
-; This function IS NOT used to execute the statements that in the main scope of the program. Rather it executes only blocks of statements (e.g. while-block, try-catch-finally, etc.)
-; Returns the state after execution of the instructions in the block
+;; Executes a block of statements enclosed by brackets, and returns the state after execution
 (define (M-block stmt-list state return next-outer continue break throw)
     (cond
-      [(null? stmt-list)   (next-outer (remove-layer state))]
+      [(null? stmt-list)   (next-outer state)]
       [else                (M-block (cdr stmt-list)
-                                    (call/cc (lambda (next-inner) (M-state (car stmt-list) state return next-inner continue break throw)))
+                                    (call/cc (lambda (next-inner)
+                                               (M-state (car stmt-list) state return next-inner continue break throw)))
                                     return
                                     next-outer
                                     continue
@@ -115,40 +175,85 @@
                                     throw)]))
 
 
-; returns the boolean or integer value that an expression evaluates to
-(define (M-value expr state return)
+; input: a funcall statement, a state before the funcall execution, and two continuations next and throw
+; output: the state after executing the funcall in stmt
+(define (M-call-state stmt state next throw)
+    (let* ((closure (get-value (function-name stmt) state clean-return-cont))
+           (fstate1 ((closure-environment closure) state))
+           (fstate2 (add-layer fstate1))
+           (fstate3 (bind-parameters (closure-params closure)
+                                     (function-args stmt)
+                                     fstate2
+                                     state
+                                     throw)))
+      (M-block (closure-body closure)
+               fstate3
+               (lambda (v s) (next state))
+               (lambda (s) (next state))
+               (lambda (s) (error 'break-not-allowed-outside-loop))
+               (lambda (s) (error 'continue-not-allowed-outside-loop))
+               (lambda (v s) (M-throw v state throw)))))
+
+
+;; Executes a function call and returns the value returned by the function call
+;;An error is thrown if the function has no return value. 
+(define (M-call-value stmt state throw)
+    (let* ((closure (get-value (function-name stmt) state clean-return-cont))
+           (fstate1 ((closure-environment closure) state))
+           (fstate2 (add-layer fstate1))
+           (fstate3 (bind-parameters (closure-params closure)
+                                     (function-args stmt)
+                                     fstate2
+                                     state
+                                     throw)))
+      (call/cc (lambda (return) (M-block (closure-body closure)
+                                         fstate3
+                                         return
+                                         (lambda (s) (error 'return-not-found-when-expected))
+                                         (lambda (s) (error 'break-not-allowed-outside-loop))
+                                         (lambda (s) (error 'continue-not-allowed-outside-loop))
+                                         (lambda (v s) (M-throw v state throw)))))))
+
+
+;; returns the boolean or integer value that an expression evaluates to
+(define (M-value expr state throw return)
     (cond
+      ; handling of assignment expression
       [(and (list? expr) (eq? (operator expr) '=))   (return (M-assign-value (leftoperand expr)
-                                                                                  (M-value (rightoperand expr) state clean-return-cont)
+                                                                                  (M-value (rightoperand expr) state throw clean-return-cont)
                                                                                   state
                                                                                   clean-return-cont))]
-      [else                                          (let ((bool-output (M-boolean expr state clean-return-cont)))
+      [(and (list? expr) (eq? (operator expr) 'funcall))   (M-call-value expr state throw)]
+      [else                                          (let ((bool-output (M-boolean expr state throw clean-return-cont)))
                                                        (if (eq? bool-output 'error)
-                                                           (M-int expr state return) 
+                                                           (M-int expr state throw return) 
                                                            (return bool-output)))]))
 
 
-; Takes in list of the form "(var variable)" or "(var variable value)"
-; If a "value" is specified, the function returns the a new state with the name/value binding. Otherwise, the function returns the state with the name bound to 'novalue.
-(define (M-declare stmt state)
-    (let ((in-state (in-state? (leftoperand stmt) state clean-return-cont)))
+;; Takes in a declaration statement that may or may not contain a value. If no value is specified, the variable is bound to 'novalue.
+;; An error is thrown if a variable has already been declared.
+(define (M-declare stmt state throw)
+    (let ((in-local-state (in-local-state? (leftoperand stmt) state clean-return-cont)))
       (cond
-        [in-state                       (error 'redefining-variable)]
+        [in-local-state                 (error 'redefining-variable)]
         [(null? (var-dec-value stmt))   (add-binding (leftoperand stmt) 'novalue state)]
-        [else                           (add-binding (leftoperand stmt) (M-value (rightoperand stmt) state clean-return-cont) state)])))
+        [(eq? (car stmt) 'function)     (add-binding (function-name stmt)
+                                                     (make-func-closure (function-name stmt) (function-params stmt) (function-body stmt) state)
+                                                     state)]
+        [else                           (add-binding (leftoperand stmt) (M-value (rightoperand stmt) state throw clean-return-cont) state)])))
 
 
-; Takes in list of the form "(= variable expression)"
-; Returns the state after removing the previous name/value binding for "var" (if it existed) and adding the new (variable, value) binding, where value is what expr evaluates to
-(define (M-assign stmt state)
+;; Evaluates an assignment statement. The return value of the assignment ISN'T used, so it is ignored and the new state is returned.
+;; The new state will  replace the binding on the closest layer in the state
+(define (M-assign stmt state throw)
   (update-value (leftoperand stmt)
-                (M-value (rightoperand stmt) state clean-return-cont)
+                (M-value (rightoperand stmt) state throw clean-return-cont)
                 state
                 state
                 clean-return-cont))
 
 
-;; Updates the value of a variable in the state, and returns the new value
+;; Evaluates an assignment expression. The return value of the assignment IS used, so the variable reference is updated and the value is returned
 ;; Identical to the function "update-value", however this functions returns the value being assigned instead of the new state
 (define (M-assign-value var newvalue state return)
   (cond
@@ -158,21 +263,20 @@
     [else                             (M-assign-value var newvalue (remaining-state state) return)]))
 
 
-; Takes in list of the form "(if conditional then-statement optional-else-statement)"
-; Returns the state after execution of "then-statement" if "conditional" evaluates to 'true. Otherwise, returns state after execution of "optional-else-statement"
+;; Takes in an if-statement that has an optional else block, and executes the branch that is determined by the condition.
+;; Allows for side effects in the condition statement
 (define (M-if stmt state return next continue break throw)
        (cond 
-         [(eq? (M-boolean (condition stmt) state clean-return-cont) 'true)  (M-state (first-stmt stmt) state return next continue break throw)]
+         [(eq? (M-boolean (condition stmt) state throw clean-return-cont) 'true)  (M-state (first-stmt stmt) state return next continue break throw)]
          [(pair? (else-if stmt))                                            (M-state (second-stmt stmt) state return next continue break throw)]
          [else                                                              (next state)]))
 
 
-; Takes in list of the form "(while conditional body-statement)"
-; If "conditional" evaluates to 'true, the state returned from "body-statement" will be used to evaluate "conditional" again. Once the "conditional" evaluates to 'false,
-; the state from the final call to "body-statement" will be returned
+;; Takes in a while statement, and executes the loop body repeatedly until condition evaluates to false
+;; Allows for side effects in the condition statement
 (define (M-while stmt state return next break throw)
       (cond
-        [(eq? (M-boolean (condition stmt) state clean-return-cont) 'true)  (M-while stmt
+        [(eq? (M-boolean (condition stmt) state throw clean-return-cont) 'true)  (M-while stmt
                                                                                     (call/cc (lambda (continue) (M-state (loop-body stmt) state return continue continue break throw)))
                                                                                     return
                                                                                     next
@@ -181,23 +285,33 @@
         [else                                                              (next state)]))
 
 
-(define (M-throw stmt state throw)
+;; Takes in a throw statement and a callback function that may take 1 or 2 arguments.
+;; NEED TO COMPLETE
+(define (M-throw expr state throw)
   (cond
-    [(eq? (procedure-arity throw) 2)   (throw (M-value (leftoperand stmt) state clean-return-cont)
+    [(eq? (procedure-arity throw) 2)   (throw (M-value expr state throw clean-return-cont)
                                                (add-layer (remove-layer state)))]
     [else                              (throw 'exception-thrown-and-not-caught)]))
 
 
-; function for execution of the try-block in a try-catch-finally, where catch and finally are allowed to be omitted.
-; has similar behavior to Java's try-catch-finally
-(define M-try
-     (lambda (stmts state return next continue break throw)
-       ; new continuations of the form (stmts state return next continue break throw)
+;; Takes in a return statement and a callback function that may take 1 or 2 arguments.
+;; NEED TO COMPLETE COMMENT
+(define (M-return expr state return throw)
+  (cond
+    [(eq? (procedure-arity return) 2)   (return (M-value expr state throw clean-return-cont)
+                                                state)]
+    [else                               (return (M-value expr state throw clean-return-cont))]))
+
+
+;; Executes the try-block in a try-catch-finally, where the catch and finally blocks are allowed to be omitted.
+;; has same behavior as Java's try-catch-finally
+(define (M-try stmts state return next continue break throw)
+       ; continuations that define the control flow behavior of try-block
        (let* ((newreturn          (lambda (s) (M-state (finally-from-try stmts) s return return continue break throw)))
               (newbreak           (lambda (s) (M-state (finally-from-try stmts) s return break continue break throw)))
               (newcontinue        (lambda (s) (M-state (finally-from-try stmts) s return continue continue break throw)))
               (newthrow           (lambda (s) (M-state (finally-from-try stmts) s return throw continue break throw)))
-              (finallycont        (lambda (s) (M-state (finally-from-try stmts) s return next continue break throw)))
+              (finallycont        (lambda (s) (M-state (finally-from-try stmts) s return next continue break throw)))  ; for complete execution of try block
               (mythrow1           (lambda (v s) (M-state (catch-and-finally stmts) (add-binding (catch-exception-name stmts) v s) return next continue break throw)))
               (mythrow2           (lambda (v s) (M-state (catch-and-finally stmts) (add-binding (catch-exception-name stmts) v s) newreturn finallycont newbreak newcontinue newthrow))))
          
@@ -206,123 +320,128 @@
                  (null? (finally-from-try stmts)))       (M-block (try-body stmts) (add-layer state) return next continue break throw)]
            [(null? (catch-only stmts))                   (M-block (try-body stmts) (add-layer state) newreturn finallycont newcontinue newbreak newthrow)]
            [(null? (finally-from-try stmts))             (M-block (try-body stmts) (add-layer state) return next continue break mythrow1)]
-           [else                                         (M-block (try-body stmts) (add-layer state) newreturn finallycont newcontinue newbreak mythrow2)]))))
+           [else                                         (M-block (try-body stmts) (add-layer state) newreturn finallycont newcontinue newbreak mythrow2)])))
 
 
-; function for execution of the catch-block in a try-catch-finally (if it has been reached)
-; In an instance of try-catch-finally, if the catch-block is omitted, then this function won't be called
-(define M-catch
-  (lambda (stmts state return next break continue throw)
-    (cond
-      [(null? (finally-from-catch stmts))      (M-block (catch-body stmts) state return next break continue throw)] 
-      [else                                    (M-block (catch-body stmts) state return next break continue throw)])))
+;; Executes the catch-block in a try-catch-finally, where the finally block is allowed to be omitted.
+;; Flow control behavior for continuations is defined in the "M-try" function
+(define (M-catch stmts state return next break continue throw)
+    (M-block (catch-body stmts) state return next break continue throw))
 
 
-; function of execution of finally-block in a try-catch-finally
-; This function displays the same behavior as M-catch, wherein if the finally-block is empty, then this function won't be called
-(define M-finally
-  (lambda (stmts state return next break continue throw)
-     (M-block (finally-body stmts) (add-layer state) return next break continue throw)))
+;; Executes the finally-block in a try-catch-finally.
+;; Flow control behavior for continuations is defined in the "M-try" function
+(define (M-finally stmts state return next break continue throw)
+     (M-block (finally-body stmts) (add-layer state) return next break continue throw))
 
 
-; Denoational mapping function that evaluates an expression through the lens of relational operators/booleans. Returns true, false, or error
-(define (M-boolean expr state return)
+;; Evaluates an expression through the lens of relational operators/booleans. Returns true, false, or error
+(define (M-boolean expr state throw return)
      (cond
        ; expressions with no operators
        [(or (eq? expr 'true) (eq? expr 'false))   (return expr)]
        [(number? expr)                            (return 'error)]
-       [(and (atom? expr))                        (M-boolean (get-value expr state clean-return-cont) state return)]
-       
-       ; expressions with operators
-       [(eq? (operator expr) '&&)        (M-boolean (leftoperand expr) state
-                                           (lambda (v-left) (M-boolean (rightoperand expr) state
-                                             (lambda (v-right) (return (language-bool (and (eq? v-left 'true) (eq? v-right 'true))))))))]
-       
-       [(eq? (operator expr) '||)        (M-boolean (leftoperand expr) state
-                                           (lambda (v-left) (M-boolean (rightoperand expr) state
-                                             (lambda (v-right) (return (language-bool (or (eq? v-left 'true) (eq? v-right 'true))))))))]
+       [(atom? expr)                              (M-boolean (get-value expr state clean-return-cont) state throw return)]
+       [(eq? (operator expr) 'funcall)            (M-boolean (M-call-value expr state throw)
+                                                             state
+                                                             throw
+                                                             return)]
 
-       [(eq? (operator expr) '!)         (M-boolean (leftoperand expr) state
+       ; unary operators
+       [(eq? (operator expr) '!)         (M-boolean (leftoperand expr) state throw
                                            (lambda (v) (return (language-bool (not (eq? v 'true))))))]
        
-       [(eq? (operator expr) '!=)        (M-value (leftoperand expr) state
-                                           (lambda (v-left) (M-value (rightoperand expr) state
+       ; binary operators
+       [(eq? (operator expr) '&&)        (M-boolean (leftoperand expr) state throw
+                                           (lambda (v-left) (M-boolean (rightoperand expr) state throw
+                                             (lambda (v-right) (return (language-bool (and (eq? v-left 'true) (eq? v-right 'true))))))))]
+       
+       [(eq? (operator expr) '||)        (M-boolean (leftoperand expr) state throw
+                                           (lambda (v-left) (M-boolean (rightoperand expr) state throw
+                                             (lambda (v-right) (return (language-bool (or (eq? v-left 'true) (eq? v-right 'true))))))))]
+       
+       [(eq? (operator expr) '!=)        (M-value (leftoperand expr) state throw
+                                           (lambda (v-left) (M-value (rightoperand expr) state throw
                                              (lambda (v-right) (return (language-bool (not (eq? v-left v-right))))))))]
        
-       [(eq? (operator expr) '==)        (M-value (leftoperand expr) state
-                                           (lambda (v-left) (M-value (rightoperand expr) state
+       [(eq? (operator expr) '==)        (M-value (leftoperand expr) state throw
+                                           (lambda (v-left) (M-value (rightoperand expr) state throw
                                              (lambda (v-right) (return (language-bool (eq? v-left v-right)))))))]
        
-       [(eq? (operator expr) '<)         (M-int (leftoperand expr) state
-                                           (lambda (v-left) (M-int (rightoperand expr) state
+       [(eq? (operator expr) '<)         (M-int (leftoperand expr) state throw
+                                           (lambda (v-left) (M-int (rightoperand expr) state throw
                                               (lambda (v-right) (return (language-bool (< v-left v-right)))))))]
        
-       [(eq? (operator expr) '<=)        (M-int (leftoperand expr) state
-                                           (lambda (v-left) (M-int (rightoperand expr) state
+       [(eq? (operator expr) '<=)        (M-int (leftoperand expr) state throw
+                                           (lambda (v-left) (M-int (rightoperand expr) state throw
                                              (lambda (v-right) (return (language-bool (<= v-left v-right)))))))]
        
-       [(eq? (operator expr) '>)         (M-int (leftoperand expr) state
-                                           (lambda (v-left) (M-int (rightoperand expr) state
+       [(eq? (operator expr) '>)         (M-int (leftoperand expr) state throw
+                                           (lambda (v-left) (M-int (rightoperand expr) state throw
                                              (lambda (v-right) (return (language-bool (> v-left v-right)))))))]
        
-       [(eq? (operator expr) '>=)        (M-int (leftoperand expr) state
-                                           (lambda (v-left) (M-int (rightoperand expr) state
+       [(eq? (operator expr) '>=)        (M-int (leftoperand expr) state throw
+                                           (lambda (v-left) (M-int (rightoperand expr) state throw
                                              (lambda (v-right) (return (language-bool (>= v-left v-right)))))))]
        
        [(eq? (operator expr) '=)         (return (M-assign-value (leftoperand expr)
-                                                                      (M-value (rightoperand expr) state clean-return-cont)
+                                                                      (M-value (rightoperand expr) state throw clean-return-cont)
                                                                       state
                                                                       clean-return-cont))]
        [else 'error]))
 
 
-; evaluates an expression through the lens of mathematical operators/integers
-(define (M-int expr state return)
+;; Evaluates an expression through the lens of mathematical operators/integers. Returns an integer or an error.
+(define (M-int expr state throw return)
     (cond
       [(number? expr)                           (return expr)]
       [(or (eq? expr 'true) (eq? expr 'false))  (return 'error)]
-      [(and (atom? expr))                       (M-int (get-value expr state clean-return-cont) state return)]
+      [(atom? expr)                             (M-int (get-value expr state clean-return-cont) state throw return)]
+      [(eq? (operator expr) 'funcall)           (M-int (M-call-value expr state throw)
+                                                           state
+                                                           throw
+                                                           return)]
       
       [(and (eq? (operator expr) '-)
-            (null? (operands-excluding-first expr)))      (M-int (operand expr) state
-                                                  (lambda (v) (return (- v))))]
+            (null? (operands-excluding-first expr)))      (M-int (operand expr) state throw
+                                                                 (lambda (v) (return (- v))))]
       
-      [(eq? (operator expr) '-)                 (M-int (leftoperand expr) state 
-                                                  (lambda (v-left) (M-int (rightoperand expr) state
+      [(eq? (operator expr) '-)                 (M-int (leftoperand expr) state throw
+                                                  (lambda (v-left) (M-int (rightoperand expr) state throw
                                                     (lambda (v-right) (return (- v-left v-right))))))]
       
-      [(eq? (operator expr) '+)                 (M-int (leftoperand expr) state 
-                                                  (lambda (v-left) (M-int (rightoperand expr) state
+      [(eq? (operator expr) '+)                 (M-int (leftoperand expr) state throw
+                                                  (lambda (v-left) (M-int (rightoperand expr) state throw
                                                     (lambda (v-right) (return (+ v-left v-right))))))]
       
-      [(eq? (operator expr) '*)                 (M-int (leftoperand expr) state
-                                                  (lambda (v-left) (M-int (rightoperand expr) state
+      [(eq? (operator expr) '*)                 (M-int (leftoperand expr) state throw
+                                                  (lambda (v-left) (M-int (rightoperand expr) state throw
                                                     (lambda (v-right) (return (* v-left v-right))))))]
       
-      [(eq? (operator expr) '/)                (M-int (leftoperand expr) state 
-                                                  (lambda (v-left) (M-int (rightoperand expr) state
+      [(eq? (operator expr) '/)                (M-int (leftoperand expr) state throw
+                                                  (lambda (v-left) (M-int (rightoperand expr) state throw
                                                     (lambda (v-right) (return (quotient v-left v-right))))))]
        
-      [(eq? (operator expr) '%)                (M-int (leftoperand expr) state 
-                                                  (lambda (v-left) (M-int (rightoperand expr) state
+      [(eq? (operator expr) '%)                (M-int (leftoperand expr) state throw
+                                                  (lambda (v-left) (M-int (rightoperand expr) state throw
                                                     (lambda (v-right) (return (remainder v-left v-right))))))]
 
        [(eq? (operator expr) '=)         (return (M-assign-value (leftoperand expr)
-                                                                      (M-value (rightoperand expr) state clean-return-cont)
+                                                                      (M-value (rightoperand expr) state throw clean-return-cont)
                                                                       state
                                                                       clean-return-cont))]
       [else                                    (return 'error)]))
 
 
 ; expected output from each of the tests
-(define answers '(20 164 32 2 error 25 21 6 -1 789 error error error 12 125 110 2000400 101 error 21))
+(define answers '(10 14 45 55 1 115 true 20 24 2 35 error 90 69 87 64 error 125 100 2000400 3421 20332 21))
 (define mains   '(A A A A A A C Square Square List List List List))
 
 
 ; function to run the interpreter program on a single test file
 ; it doesn't automatically compare the output to the expected value, rather it just prints out the return value of the program
 (define (test test-number)
-  (let ((test-file (string-append "tests/individual-test-cases/flow-control-tests/test" (number->string test-number) ".txt")))
+  (let ((test-file (string-append "tests/individual-test-cases/function-tests/test" (number->string test-number) ".txt")))
     (runcode test-file)))
 
 
