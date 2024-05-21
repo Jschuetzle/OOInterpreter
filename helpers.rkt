@@ -76,3 +76,21 @@
 (define closure-params      car)
 (define closure-body        cadr)
 (define closure-environment caddr)
+
+
+
+
+; abstractions for class defs
+; class definition abstractions
+(define class-name    cadr)
+(define parent-class (lambda (stmt)
+                        (let ((sup (caddr stmt)))
+                          (if (null? sup)
+                              'novalue
+                              (cadr sup)))))
+(define class-body    cadddr)
+
+
+; used only for the "method-field-list" that the "make-class-closure" function generates
+(define method_bindings          car) 
+(define field_bindings           cdr)

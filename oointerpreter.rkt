@@ -512,9 +512,6 @@
   (lambda (stmt state throw classname)
     (cond
       [(null? (optional_token stmt))            (add_binding (leftoperand stmt) 'novalue state)]
-
-      ; if you finish this project, then delete this line
-      ; [(or (eq? (car stmt) 'function) (eq? (car stmt) 'static-function))   (add_binding (function_name stmt) (method_closure (function_name stmt) (function_params stmt) (function_body stmt) state) state)]
       
       ;;; adds a binding for the class name, and the class closure.
       [(eq? (car stmt) 'class)                  (add_binding (class-name stmt)

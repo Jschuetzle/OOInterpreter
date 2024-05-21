@@ -24,7 +24,7 @@
                                             (lambda (s) (error 'exception-thrown))))]
       [else                                         (interpret-program
                                                        (cdr tree)
-                                                       (call/cc (lambda (next) (M-state (car tree) state return next null null null))) 
+                                                       (call/cc (lambda (next) (M-state (car tree) state return next null null null null))) 
                                                         return)]))
 
 ;; ======================================================================
@@ -100,9 +100,78 @@
       [else              'false]))
 
 
-; ======================================================================
-; FUNCTION CONSTRUCTION/DESTRUCTION
-; ======================================================================
+;; ======================================================================
+;; CLASS RELATED FUNCTIONS
+;; ======================================================================
+
+;; creates a new class closure in the following form
+;;       (superclass-name ((method names) (method closures)) ((field names) (field default exprs))
+;; NOTE: THIS ORGANIZATION WILL CHANGE ONCE MORE FUNCTIONALITY IS IMPLEMENTED
+(define (make-class-closure stmt state throw)
+    (let* ((super-cc            (optional-get-cc (parent-class stmt) state))
+
+           ; gets instance fields and organizes them in reverse ordering for processing in idx-of
+           ; format is  ((field names) (field default exprs))
+           (inst-fields         (parse-instance-fields (class-body stmt) clean-return-cont))
+           (rev-inst-fields     (list (reverse (variable-names inst-fields))
+                                      (reverse (variable-values inst-fields))))
+
+           ; gets methods in form of ((method names) (method closures))
+           ; appends methods and inst fields together for processing in body of this function
+           (method-field-list   (list (parse-instance-methods stmt) rev-inst-fields)))
+      (cond
+        [(null? supercc)   (cons 'novalue method-field-list)]
+
+        ; if superclass present, superclass slot is filled and superclass fields are appended to current class field bindings
+        [else              (cons (parent-class stmt) (list (method-bindings method-field-list)
+                                                           (list (append (variable-name (field-bindings final-mflist)) (car (cc-field-bindings supercc)))
+                                                                 (append (cadar (field-bindings final-mflist)) (cadr (cc-field-bindings supercc))))))])))
+
+
+(define (optional-get-cc class state)
+  (cond
+    [(eq? class 'novalue)   null]
+    [else                  (get-value class state clean-return-cont)]))
+
+
+;; ;; parses over the class body and returns a list containing...
+;; ;;   1. Method bindings           => ((method-names) (method-closures))
+;; ;;   2. Instance names binindgs   => ((instance-field-names) (default-value-expressions))
+;; (define parse-class-body
+;;   (lambda (classname tree return)
+;;     (cond
+;;       [(null? tree)  (return (list empty-layer empty-layer))]
+;; 
+;;       ; case where a field is encountered
+;;       [(eq? (class-dec-type tree) 'var)   (parse-class-body (cdr tree)
+;;                                                            classname
+;;                                                            (lambda (v) (return (list (method-bindings v)
+;;                                                                                      (list (cons (binding-name tree) (variable-names (field-bindings v)))
+;;                                                                                                  (cons (binding-expr tree) (variable-values (field-bindings v))))))))]
+;;       ; case where a method is encountered
+;;       [else       (parse-class-body (cdr tree)
+;;                                    classname
+;;                                    (lambda (v) (return (list (list (cons (binding-name tree) (variable-names v))
+;;                                                                    (cons (create-method-closure
+;;                                                                              (add-implicit-for-nonstatic (binding-name tree) (method-formal-params tree))
+;;                                                                              (method-def-body tree)
+;;                                                                              classname)
+;;                                                                          (variable-values v)))
+;;                                                              (car (field-bindings v))))))])))
+
+
+;; ; will add the implicit "this" to formal parameters only if non static
+;; (define add-implicit-for-nonstatic
+;;   (lambda (func-name params)
+;;     (cond
+;;       ((eq? func-name 'main) params)
+;;       (else (append params (list 'this))))))  ; have to add to back of params in order for "restore-state" to function correctl
+
+
+
+;; ======================================================================
+;; FUNCTIONS (METHODS)
+;; ======================================================================
 
 ;; creates a function closure composed of...
 ;;     1. a list of formal parameters
@@ -169,6 +238,7 @@
 ;; Returns the state after the mapping function is applied
 (define (M-state stmt state return next continue break throw)
     (cond
+      [(eq? (car stmt) 'class)      (M-declare stmt state throw)]
       [(eq? (car stmt) 'var)        (M-declare stmt state throw)]
       [(eq? (car stmt) '=)          (M-assign stmt state throw)]
       [(eq? (car stmt) 'return)     (M-return (leftoperand stmt) state return throw)]
@@ -263,6 +333,9 @@
         [(null? (var-dec-value stmt))   (add-binding (leftoperand stmt) 'novalue state)]
         [(eq? (car stmt) 'function)     (add-binding (function-name stmt)
                                                      (make-func-closure (function-name stmt) (function-params stmt) (function-body stmt) state)
+                                                     state)]
+        [(eq? (car stmt) 'class)        (add-binding (class-name stmt)
+                                                     (make-class-closure stmt state throw)
                                                      state)]
         [else                           (add-binding (leftoperand stmt) (M-value (rightoperand stmt) state throw clean-return-cont) state)])))
 
@@ -465,7 +538,7 @@
 ; function to run the interpreter program on a single test file
 ; it doesn't automatically compare the output to the expected value, rather it just prints out the return value of the program
 (define (test test-number)
-  (let ((test-file (string-append "tests/individual-test-cases/function-tests/test" (number->string test-number) ".txt")))
+  (let ((test-file (string-append "tests/individual-test-cases/oo-tests/test" (number->string test-number) ".txt")))
     (runcode test-file)))
 
 

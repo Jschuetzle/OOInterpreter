@@ -91,7 +91,7 @@
 
 ; instance closure
 (define runtime_type         car)
-(define instance_values      cadr)
+(define instance_values      cdr)
 
 
 ; method closures
