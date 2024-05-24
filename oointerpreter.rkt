@@ -8,8 +8,7 @@
 ;; import and implementation section
 
 (require "parser.rkt")
-(require "helpers.rkt")
-(require "test-cases.rkt")
+(require "oohelpers.rkt")
 
 ;;; ======================================================================
 ;;; FUNCTIONS FOR RUNNING THE INTERPRETER
@@ -189,7 +188,7 @@
 ;
 (define class_closure
   (lambda (stmt state throw)
-    (let* (   (method_field_list    (parse_class_body (class_body stmt) (class-name stmt) (lambda (v) v)))
+    (let* (   (method_field_list    (parse_class_body (class_body stmt) (class_name stmt) (lambda (v) v)))
               (supercc              (if (eq? (class_extends stmt) 'novalue)   ; gets the super class closure if deriving
                                            null
                                            (get_value (class_extends stmt) state (lambda (v) v))))
@@ -514,7 +513,7 @@
       [(null? (optional_token stmt))            (add_binding (leftoperand stmt) 'novalue state)]
       
       ;;; adds a binding for the class name, and the class closure.
-      [(eq? (car stmt) 'class)                  (add_binding (class-name stmt)
+      [(eq? (car stmt) 'class)                  (add_binding (class_name stmt)
                                                              (class_closure stmt state throw)
                                                              state)]
       [(eq? (car stmt) 'var)                     (add_binding (leftoperand stmt) (M_value (rightoperand stmt) state throw (lambda (v) v) classname) state)]

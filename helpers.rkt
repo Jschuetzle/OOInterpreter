@@ -8,13 +8,19 @@
 ;; return continuation used for better readability
 (define clean-return-cont (lambda (v) v))
 
-(define (in-list? item list)
-  (cond
-    [(null? list)  #f]
-    [else          (in-list? item (cdr list))]))
-
 ; for general use
 (define (atom? x) (not (or (pair? x) (null? x))))
+(define strip-list
+  (lambda (expr)
+    (cond
+      [(null? expr) expr]
+      [else         (car expr)])))
+
+(define (in-list? item list)
+  (cond
+    [(null? list)           #f]
+    [(eq? (car list) item)  #t]
+    [else                   (in-list? item (cdr list))]))
 
 ;; the state is stored in the following form
 ;;          ( ((names) (values)) ... )
@@ -70,15 +76,16 @@
 
 
 ; abstractions for function defs
-(define function-name   cadr)
-(define function-params caddr)
-(define function-body   cadddr)
-(define function-args   cddr)
+(define function-name            cadr)
+(define function-params          caddr)
+(define function-body            cadddr)
+(define function-args            cddr)
 
 ; abstractions for function closures
-(define closure-params      car)
-(define closure-body        cadr)
-(define closure-environment caddr)
+(define closure-params           car)
+(define closure-body             cadr)
+(define closure-environment      caddr)
+(define function-enclosing-class cdddr)
 
 
 
@@ -105,6 +112,7 @@
 (define field-bindings  cdr)
 
 ; class closure abstractions
-(define superclass               car)
-(define cc-method-bindings       cadr)
-(define cc-field-bindings        caddr)
+(define superclass       car)
+(define static-methods   cadr)
+(define inst-methods     caddr)
+(define inst-fields      cadddr)

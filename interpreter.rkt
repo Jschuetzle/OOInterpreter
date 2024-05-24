@@ -6,26 +6,28 @@
 
 
 ;; Runs the interpreter on a file with source code. The main method in "class-name" is used
-(define (runcode filename)
-    (interpret (parser filename)))
+(define (runcode filename classname)
+    (interpret (parser filename) classname))
 
 
 ;; Root function of interpreter. Takes a parse tree as input and outputs the result of the program execution (assuminging we run main method of "class-name")
-(define (interpret tree)
-  (call/cc (lambda (return) (interpret-program tree (list empty-layer) return))))
+(define (interpret tree classname)
+  (call/cc (lambda (return) (interpret-program tree (list empty-layer) classname return))))
 
 
 ;; Adds all the global variables and functions to the state and then executes the "main" function
 ;; Hoisting is NOT implemented, therefore the main function must be at the bottom of the program.
-(define (interpret-program tree state return)
+(define (interpret-program tree state classname return)
     (cond
       [(null? tree)   (return (M-call-value (list 'funcall 'main)  ; execution of main
                                             state
+                                            get-static-func-closure
+                                            classname
                                             (lambda (s) (error 'exception-thrown))))]
-      [else                                         (interpret-program
-                                                       (cdr tree)
-                                                       (call/cc (lambda (next) (M-state (car tree) state return next null null null null))) 
-                                                        return)]))
+      [else                                         (interpret-program (cdr tree)
+                                                                       (call/cc (lambda (next) (M-state (car tree) state return next null null null)))
+                                                                       classname
+                                                                       return)]))
 
 ;; ======================================================================
 ;; STATE UPDATE FUNCTIONS
@@ -117,8 +119,8 @@
                                       (reverse (variable-values inst-fields))))
 
            ; gets methods in form of ((method names) (method closures))
-           (static-methods      (parse-class-body 'static-function (class-name stmt) (class-body stmt) clean-return-cont))
-           (inst-methods        (parse-class-body 'function (class-name stmt) (class-body stmt) clean-return-cont))
+           (static-methods      (strip-list (parse-class-body 'static-function (class-name stmt) (class-body stmt) clean-return-cont)))
+           (inst-methods        (strip-list (parse-class-body 'function (class-name stmt) (class-body stmt) clean-return-cont)))
            
            ; appends methods and fields together for processing in body of this function
            (method-field-list   (list static-methods inst-methods rev-inst-fields)))
@@ -127,8 +129,8 @@
 
         ; if superclass present, superclass slot is filled and superclass fields are appended to current class field bindings
         [else              (cons (parent-class stmt) (list (method-bindings method-field-list)
-                                                           (list (append (variable-names (field-bindings method-field-list)) (variable-names (list (cc-field-bindings super-cc))))
-                                                                 (append (variable-values (field-bindings method-field-list)) (variable-values (list (cc-field-bindings super-cc)))))))])))
+                                                           (list (append (variable-names (field-bindings method-field-list)) (variable-names (list (inst-fields super-cc))))
+                                                                 (append (variable-values (field-bindings method-field-list)) (variable-values (list (inst-fields super-cc)))))))])))
 
 
 (define (optional-get-cc class state)
@@ -164,8 +166,14 @@
                                                                                    classname
                                                                                    (cdr tree)
                                                                                    (lambda (v) (return (list (list (cons (function-name declaration) (variable-names v))
-                                                                                                                   (cons (make-func-closure (functio params body current-state)
-                                                                                                                         (variable-values v)))))))])))
+                                                                                                                   (cons (make-func-closure (function-params declaration)
+                                                                                                                                            (function-body declaration)
+                                                                                                                                            classname)
+                                                                                                                         (variable-values v)))))))]
+      [else                                                     (parse-class-body stmt-type
+                                                                                  classname
+                                                                                  (cdr tree)
+                                                                                  return)])))
 
 ;; ; will add the implicit "this" to formal parameters only if non static
 ;; (define add-implicit-for-nonstatic
@@ -175,6 +183,34 @@
 ;;       (else (append params (list 'this))))))  ; have to add to back of params in order for "restore-state" to function correctl
 
 
+;; obtains the method closure for a static method. If the static method doesn't exist, it examined the parent class's methods (if applicable).
+;; If the method doesn't exist at all, an error is thrown.
+(define (get-static-func-closure name state classname)
+    (let ((cc (get-value classname state clean-return-cont)))
+      (get-func-closure name
+                        (list (static-methods cc))
+                        (superclass cc)
+                        state
+                        static-methods
+                        clean-return-cont)))
+
+
+;; Looks through a function list that has the form (( (method-names) (method-closures) )) and returns the closures associated with a func name
+;; if the name doesn't exist in the funclist and a superclass exists, the same process is done on the superclass's functions
+;; nextlist is a function that correctly obtains the function list of the super class (since it may be the static or inst functions).
+(define (get-func-closure name funclist super state nextlist return)
+  (cond
+    [(and (null? (variable-names funclist)) (eq? super 'novalue))   (error 'invalid-method-called)]
+    [(null? (variable-names funclist))                              (get-func-closure name
+                                                                                      ;; super's functions are put inside a list so the original state functions can be used
+                                                                                      (list (nextlist (get-value super state clean-return-cont)))
+                                                                                      (superclass (get-value super state clean-return-cont))
+                                                                                      state
+                                                                                      nextlist
+                                                                                      return)]
+    [(eq? (front-name funclist) name)                               (return (front-value funclist))]
+    [else                                                           (get-func-closure name (remaining-state funclist) super state nextlist return)]))
+                                                                     
 
 ;; ======================================================================
 ;; FUNCTIONS (METHODS)
@@ -186,12 +222,11 @@
 ;;     3. a function that generates the active environment available during function execution (excluding the local scope)
 ;; The third component is necessary in order to allow for recursion because adding the function closure to the state
 ;; while we are creating the function closure is impossible
-(define (make-func-closure name params body current-state)
+(define (make-func-closure params body classname)
     (list params
           body
-          (lambda (future-state) (add-binding name
-                                   (get-value name future-state clean-return-cont)
-                                   current-state))))
+          (lambda (future-state) 10)
+          classname))
 
 
 ;; Takes a list of formal parameters and list of associated argument expressions, evaluates the argument expressions, and
@@ -298,8 +333,8 @@
 
 ;; Executes a function call and returns the value returned by the function call
 ;;An error is thrown if the function has no return value. 
-(define (M-call-value stmt state throw)
-    (let* ((closure (get-value (function-name stmt) state clean-return-cont))
+(define (M-call-value stmt state get-closure classname throw)
+    (let* ((closure (get-closure (function-name stmt) state classname))
            (fstate1 ((closure-environment closure) state))
            (fstate2 (add-layer fstate1))
            (fstate3 (bind-parameters (closure-params closure)
@@ -339,7 +374,7 @@
         [in-local-state                 (error 'redefining-variable)]
         [(null? (var-dec-value stmt))   (add-binding (leftoperand stmt) 'novalue state)]
         [(eq? (car stmt) 'function)     (add-binding (function-name stmt)
-                                                     (make-func-closure (function-name stmt) (function-params stmt) (function-body stmt) state)
+                                                     (make-func-closure (function-params stmt) (function-body stmt) state)
                                                      state)]
         [(eq? (car stmt) 'class)        (add-binding (class-name stmt)
                                                      (make-class-closure stmt state throw)
@@ -539,14 +574,14 @@
 
 ; expected output from each of the tests
 (define answers '(10 14 45 55 1 115 true 20 24 2 35 error 90 69 87 64 error 125 100 2000400 3421 20332 21))
-(define mains   '(A A A A A A C Square Square List List List List))
+(define mains   '(A A A A A A C Square Square List List List C A B A A A B B Box A A A Circle Circle Square A B A))
 
 
 ; function to run the interpreter program on a single test file
 ; it doesn't automatically compare the output to the expected value, rather it just prints out the return value of the program
-(define (test test-number)
+(define (test test-number classname)
   (let ((test-file (string-append "tests/individual-test-cases/oo-tests/test" (number->string test-number) ".txt")))
-    (runcode test-file)))
+    (runcode test-file classname)))
 
 
 ; function to run the interpreter on all tests from 1 to num-tests
@@ -556,10 +591,10 @@
 ; run-all-tests 20 ; This will run tests from 1 to 20, continuing even if errors occur
 (define (run-all-tests num-tests)
   (define (run-and-check-tests test-number)
-    (let* ;((class-with-main (expected-main mains test-number))
-          ((expected (expected-result answers test-number))
+    (let* ((class-with-main (expected-main mains test-number))
+           (expected (expected-result answers test-number))
            (actual (with-handlers ([exn? (lambda (e) e)]) 
-                            (test test-number))))
+                            (test test-number class-with-main))))
       (cond
         [(or (and (exn? actual) (eq? expected 'error)) (equal? actual expected))
                (begin (display (format "Test ~a: Passed\n" test-number)) #t)]
@@ -579,5 +614,5 @@
 (define expected-main
   (lambda (list test-number)
     (cond
-      [(zero? (- test-number 1)) (car list)]
+      [(zero? test-number) (car list)]
       (else (expected-main (cdr list) (- test-number 1))))))
