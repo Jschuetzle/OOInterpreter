@@ -8,7 +8,10 @@
 ;; return continuation used for better readability
 (define clean-return-cont (lambda (v) v))
 
-
+(define (in-list? item list)
+  (cond
+    [(null? list)  #f]
+    [else          (in-list? item (cdr list))]))
 
 ; for general use
 (define (atom? x) (not (or (pair? x) (null? x))))
@@ -90,7 +93,18 @@
                               (cadr sup)))))
 (define class-body    cadddr)
 
+; used while iterating through declarations in a class body
+(define declaration-type        caar)   ; the type of declaration is either a (var ...) or a (function ...)
+(define binding-name            cadar)
+(define binding-expr            (lambda (stmt) (if (eq? (length (car stmt)) 2) 'novalue (caddar stmt))))
+(define method-formal-params caddar)
+(define method-def-body         (lambda (stmt) (car (cdddar stmt))))
 
 ; used only for the "method-field-list" that the "make-class-closure" function generates
-(define method_bindings          car) 
-(define field_bindings           cdr)
+(define method-bindings car) 
+(define field-bindings  cdr)
+
+; class closure abstractions
+(define superclass               car)
+(define cc-method-bindings       cadr)
+(define cc-field-bindings        caddr)

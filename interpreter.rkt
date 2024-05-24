@@ -12,7 +12,7 @@
 
 ;; Root function of interpreter. Takes a parse tree as input and outputs the result of the program execution (assuminging we run main method of "class-name")
 (define (interpret tree)
-  (call/cc (lambda (return) (interpret-program tree '((()())) return))))
+  (call/cc (lambda (return) (interpret-program tree (list empty-layer) return))))
 
 
 ;; Adds all the global variables and functions to the state and then executes the "main" function
@@ -105,27 +105,30 @@
 ;; ======================================================================
 
 ;; creates a new class closure in the following form
-;;       (superclass-name ((method names) (method closures)) ((field names) (field default exprs))
+;;       (superclass-name ((static method names) (static method closures)) ((method names) (method closures)) ((field names) (field default exprs)) )
 ;; NOTE: THIS ORGANIZATION WILL CHANGE ONCE MORE FUNCTIONALITY IS IMPLEMENTED
 (define (make-class-closure stmt state throw)
     (let* ((super-cc            (optional-get-cc (parent-class stmt) state))
 
            ; gets instance fields and organizes them in reverse ordering for processing in idx-of
            ; format is  ((field names) (field default exprs))
-           (inst-fields         (parse-instance-fields (class-body stmt) clean-return-cont))
+           (inst-fields         (parse-class-body 'var (class-name stmt) (class-body stmt) clean-return-cont))
            (rev-inst-fields     (list (reverse (variable-names inst-fields))
                                       (reverse (variable-values inst-fields))))
 
            ; gets methods in form of ((method names) (method closures))
-           ; appends methods and inst fields together for processing in body of this function
-           (method-field-list   (list (parse-instance-methods stmt) rev-inst-fields)))
+           (static-methods      (parse-class-body 'static-function (class-name stmt) (class-body stmt) clean-return-cont))
+           (inst-methods        (parse-class-body 'function (class-name stmt) (class-body stmt) clean-return-cont))
+           
+           ; appends methods and fields together for processing in body of this function
+           (method-field-list   (list static-methods inst-methods rev-inst-fields)))
       (cond
-        [(null? supercc)   (cons 'novalue method-field-list)]
+        [(null? super-cc)   (cons 'novalue method-field-list)]
 
         ; if superclass present, superclass slot is filled and superclass fields are appended to current class field bindings
         [else              (cons (parent-class stmt) (list (method-bindings method-field-list)
-                                                           (list (append (variable-name (field-bindings final-mflist)) (car (cc-field-bindings supercc)))
-                                                                 (append (cadar (field-bindings final-mflist)) (cadr (cc-field-bindings supercc))))))])))
+                                                           (list (append (variable-names (field-bindings method-field-list)) (variable-names (list (cc-field-bindings super-cc))))
+                                                                 (append (variable-values (field-bindings method-field-list)) (variable-values (list (cc-field-bindings super-cc)))))))])))
 
 
 (define (optional-get-cc class state)
@@ -134,31 +137,35 @@
     [else                  (get-value class state clean-return-cont)]))
 
 
-;; ;; parses over the class body and returns a list containing...
-;; ;;   1. Method bindings           => ((method-names) (method-closures))
-;; ;;   2. Instance names binindgs   => ((instance-field-names) (default-value-expressions))
-;; (define parse-class-body
-;;   (lambda (classname tree return)
-;;     (cond
-;;       [(null? tree)  (return (list empty-layer empty-layer))]
-;; 
-;;       ; case where a field is encountered
-;;       [(eq? (class-dec-type tree) 'var)   (parse-class-body (cdr tree)
-;;                                                            classname
-;;                                                            (lambda (v) (return (list (method-bindings v)
-;;                                                                                      (list (cons (binding-name tree) (variable-names (field-bindings v)))
-;;                                                                                                  (cons (binding-expr tree) (variable-values (field-bindings v))))))))]
-;;       ; case where a method is encountered
-;;       [else       (parse-class-body (cdr tree)
-;;                                    classname
-;;                                    (lambda (v) (return (list (list (cons (binding-name tree) (variable-names v))
-;;                                                                    (cons (create-method-closure
-;;                                                                              (add-implicit-for-nonstatic (binding-name tree) (method-formal-params tree))
-;;                                                                              (method-def-body tree)
-;;                                                                              classname)
-;;                                                                          (variable-values v)))
-;;                                                              (car (field-bindings v))))))])))
+(define (optional-get-dec tree)
+  (cond
+    [(null? tree)   null]
+    [else           (car tree)]))
 
+
+;; parses over the class body and returns a list containing...
+;;   1. Method bindings           => ((method-names) (method-closures))
+;;   2. Instance names binindgs   => ((instance-field-names) (default-value-expressions))
+(define (parse-class-body stmt-type classname tree return)
+    (let ((declaration (optional-get-dec tree)))
+    (cond
+      [(null? declaration)                                       (return (list empty-layer))]
+
+      ; case where the correct dec type is encountered
+      [(and (eq? (operator declaration) stmt-type)
+            (in-list? stmt-type '(var static-var)))              (parse-class-body stmt-type
+                                                                                   classname
+                                                                                   (cdr tree)
+                                                                                   (lambda (v) (return (list (list (cons (leftoperand declaration) (variable-names v))
+                                                                                                                   (cons (rightoperand declaration) (variable-values v)))))))]
+      
+      [(and (eq? (operator declaration) stmt-type)
+            (in-list? stmt-type '(function static-function)))    (parse-class-body stmt-type
+                                                                                   classname
+                                                                                   (cdr tree)
+                                                                                   (lambda (v) (return (list (list (cons (function-name declaration) (variable-names v))
+                                                                                                                   (cons (make-func-closure (functio params body current-state)
+                                                                                                                         (variable-values v)))))))])))
 
 ;; ; will add the implicit "this" to formal parameters only if non static
 ;; (define add-implicit-for-nonstatic
@@ -209,25 +216,25 @@
                                                             throw)]))
 
 
-;; ; input: a state after executing a function, and a state before the function execution occured
-;; ; output: the original state with any updating changes to active bindings after the function was executed
-;; (define (restore-state funcstate state)
-;;     (restore-state-helper funcstate state clean-return-cont))
-;; 
-;; 
-;; ; helper function for "restore-state"
-;; ; the return is a continuation to ensure cps style
-;; (define restore-state-helper
-;;   (lambda (fstate state return)
-;;     (cond
-;;       [(null? state)                                             (return state)]
-;;       [(null? (variable-names state))                            (restore-state-helper fstate (remaining-layers state) return)]
-;;       [(in-state? (front-name state) fstate clean-return-cont)   (restore-state-helper fstate (remaining-state state) return)]
-;;       [else                               (let ((new-state (update-value (front-name fstate)
-;;                                                                          (unbox (front-value fstate))
-;;                                                                          state
-;;                                                                          clean-return-cont)))
-;;                                             (restore-state-helper (remaining-state fstate) new-state return))])))
+; input: a state after executing a function, and a state before the function execution occured
+; output: the original state with any updating changes to active bindings after the function was executed
+(define (restore-state funcstate state)
+    (restore-state-helper funcstate state clean-return-cont))
+
+
+; helper function for "restore-state"
+; the return is a continuation to ensure cps style
+(define restore-state-helper
+  (lambda (fstate state return)
+    (cond
+      [(null? state)                                             (return state)]
+      [(null? (variable-names state))                            (restore-state-helper fstate (remaining-layers state) return)]
+      [(in-state? (front-name state) fstate clean-return-cont)   (restore-state-helper fstate (remaining-state state) return)]
+      [else                               (let ((new-state (update-value (front-name fstate)
+                                                                         (unbox (front-value fstate))
+                                                                         state
+                                                                         clean-return-cont)))
+                                            (restore-state-helper (remaining-state fstate) new-state return))])))
 
 
 ;; ======================================================================
