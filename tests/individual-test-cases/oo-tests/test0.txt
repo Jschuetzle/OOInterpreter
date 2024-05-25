@@ -1,5 +1,6 @@
-class A {
+class B {
   static function main() {
-    return 5;
+    var b = new B();
+    return b;
   }
 }

@@ -116,3 +116,7 @@
 (define static-methods   cadr)
 (define inst-methods     caddr)
 (define inst-fields      cadddr)
+
+; for selecting a specific part of method/field bindings
+(define names            car)
+(define values           cadr)
