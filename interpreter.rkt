@@ -22,10 +22,10 @@
       [(null? tree)   (return (M-call-value (list 'funcall 'main)  ; execution of main
                                             state
                                             get-static-func-closure
-                                            classname
-                                            (lambda (s) (error 'exception-thrown))))]
+                                            (lambda (s) (error 'exception-thrown))
+                                            classname))]
       [else                                         (interpret-program (cdr tree)
-                                                                       (call/cc (lambda (next) (M-state (car tree) state return next null null null)))
+                                                                       (call/cc (lambda (next) (M-state (car tree) state return next null null null null)))
                                                                        classname
                                                                        return)]))
 
@@ -133,12 +133,15 @@
                                                                  (append (variable-values (field-bindings method-field-list)) (variable-values (list (inst-fields super-cc)))))))])))
 
 
+;; gets the class closure of some class name. If the argument has no name, then return null
+;; used when obtaining the super class closure, which may or may not exist
 (define (optional-get-cc class state)
   (cond
     [(eq? class 'novalue)   null]
     [else                  (get-value class state clean-return-cont)]))
 
 
+;; obtains the front declaration statement from a list of declarations...used while parsing decs in a class body
 (define (optional-get-dec tree)
   (cond
     [(null? tree)   null]
@@ -191,31 +194,48 @@
 ;; ======================================================================
 ;; OBJECT (INSTANCE) RELATED FUNCTIONS 
 ;; ======================================================================
-; creates new instance closure that will take runtime type and instance field values
+
+;; creates new instance closure that will hold runtime type and instance field values
 (define (make-instance-closure runtime-type state throw)
     (list runtime-type
           (get-default-field-values runtime-type state throw)))
 
 
-; given a classname, evaluates the default field expressions and returns their values
+;; evaluates the default field expressions from some class and returns a list of their values
 (define (get-default-field-values classname state throw)
-    ; if the field generating expressions where actual expressions instead of constants, then this must change
-    ; because the expressions would just be returned instead of evaluated
   (let ((default-exprs (values (inst-fields (get-value classname state clean-return-cont)))))
     (reverse (eval-default-exprs default-exprs
                                  state
                                  throw
+                                 classname
                                  clean-return-cont))))
 
 
-(define (eval-default-exprs exprlist state throw return)
+;; helper method that does the actual recursion for "get-default-field-values" function
+(define (eval-default-exprs exprlist state throw classname return)
   (cond
     [(null? exprlist)   (return exprlist)]
-    [else               (eval-default-exprs (cdr exprlist) state throw
-                          (lambda (v) (cons (M-value (car exprlist) state throw clean-return-cont)
-                                            v)))]))
-                                            
+    [else               (eval-default-exprs (cdr exprlist) state throw classname
+                          (lambda (v) (return (cons (M-value (car exprlist) state throw classname clean-return-cont) v))))]))
 
+
+;; given a list of field names, return the current BACK INDEX of argument "name"
+;;    BACK INDEX ((length-1) - normal index), which will subsequently be used to find the associated instance value
+(define (lookup-fields inst-names name)
+    (cond
+      [(null? inst-names)            (error 'instance-field-not-valid)]
+      [(eq? (car inst-names) name)   (length (cdr inst-names))]
+      [else                          (lookup-fields (cdr inst-names) name)]))
+
+
+;; returns the value at index "n" in list "inst-values"
+;; used with the output from the "lookup-fields" function
+(define (idx-of n inst-values)
+    (cond
+      [(null? inst-values)  (error 'field-index-not-possible)]
+      [(zero? n)            (car inst-values)]
+      [else                 (idx-of (- n 1) (cdr inst-values))]))
+                                            
 ;; ======================================================================
 ;; FUNCTIONS (METHODS)
 ;; ======================================================================
@@ -235,7 +255,7 @@
 
 ;; Takes a list of formal parameters and list of associated argument expressions, evaluates the argument expressions, and
 ;; adds these bindings to the local state of the function to be executed
-(define (bind-parameters params args fstate state throw)
+(define (bind-parameters params args fstate state throw classname)
     (cond
       [(and (null? params) (null? args))   fstate]
       [(or (null? params) (null? args))    (error 'mismatched-parameters)]
@@ -245,17 +265,20 @@
                                                                            (get-reference (car args) state clean-return-cont)
                                                                            fstate)
                                                             state
-                                                            throw)]
+                                                            throw
+                                                            classname)]
+      
       [else                                (bind-parameters (cdr params)
                                                             (cdr args)
                                                             (add-binding (car params)
-                                                                         (M-value (car args) state throw clean-return-cont)
+                                                                         (M-value (car args) state throw classname clean-return-cont)
                                                                          fstate)
                                                             state
-                                                            throw)]))
+                                                            throw
+                                                            classname)]))
 
 
-;; obtains the method closure for a static method. If the static method doesn't exist, it examined the parent class's methods (if applicable).
+;; obtains the method closure for a static method. If the static method doesn't exist, it examines the parent class's methods (if applicable).
 ;; If the method doesn't exist at all, an error is thrown.
 (define (get-static-func-closure name state classname)
     (let ((cc (get-value classname state clean-return-cont)))
@@ -264,6 +287,18 @@
                         (superclass cc)
                         state
                         static-methods
+                        clean-return-cont)))
+
+
+;; obtains the method closure for an instance method. If the instance method doesn't exist, it examines the parent class's methods (if applicable).
+;; If the method doesn't exist at all, an error is thrown.
+(define (get-inst-func-closure name state classname)
+    (let ((cc (get-value classname state clean-return-cont)))
+      (get-func-closure name
+                        (list (inst-methods cc))
+                        (superclass cc)
+                        state
+                        inst-methods
                         clean-return-cont)))
 
 
@@ -311,42 +346,43 @@
 
 ;; Takes in a single accepted statement from the parse tree, and calls the proper mapping function.
 ;; Returns the state after the mapping function is applied
-(define (M-state stmt state return next continue break throw)
+(define (M-state stmt state return next continue break throw classname)
     (cond
-      [(eq? (car stmt) 'class)      (M-declare stmt state throw)]
-      [(eq? (car stmt) 'var)        (M-declare stmt state throw)]
-      [(eq? (car stmt) '=)          (M-assign stmt state throw)]
-      [(eq? (car stmt) 'return)     (M-return (leftoperand stmt) state return throw)]
-      [(eq? (car stmt) 'begin)      (M-block (cdr stmt) (add-layer state) return next continue break throw)]
-      [(eq? (car stmt) 'function)   (M-declare stmt state throw)]
-      [(eq? (car stmt) 'funcall)    (M-call-state stmt state next throw)]
-      [(eq? (car stmt) 'if)         (M-if stmt state return next continue break throw)]
-      [(eq? (car stmt) 'while)      (M-while stmt state return next next throw)]
+      [(eq? (car stmt) 'class)      (M-declare stmt state throw classname)]
+      [(eq? (car stmt) 'var)        (M-declare stmt state throw classname)]
+      [(eq? (car stmt) '=)          (M-assign stmt state throw classname)]
+      [(eq? (car stmt) 'return)     (M-return (leftoperand stmt) state return throw classname)]
+      [(eq? (car stmt) 'begin)      (M-block (cdr stmt) (add-layer state) return next continue break throw classname)]
+      [(eq? (car stmt) 'function)   (M-declare stmt state throw classname)]
+      [(eq? (car stmt) 'funcall)    (M-call-state stmt state next throw classname)]
+      [(eq? (car stmt) 'if)         (M-if stmt state return next continue break throw classname)]
+      [(eq? (car stmt) 'while)      (M-while stmt state return next next throw classname)]
       [(eq? (car stmt) 'continue)   (continue (remove-layer state))]
       [(eq? (car stmt) 'break)      (break (remove-layer state))]
-      [(eq? (car stmt) 'throw)      (M-throw (leftoperand stmt) state throw)]
-      [(eq? (car stmt) 'try)        (M-try stmt state return next continue break throw)]
-      [(eq? (car stmt) 'finally)    (M-finally stmt state return next continue break throw)]
-      [(eq? (caar stmt) 'catch)     (M-catch stmt state return next continue break throw)]))
+      [(eq? (car stmt) 'throw)      (M-throw (leftoperand stmt) state throw classname)]
+      [(eq? (car stmt) 'try)        (M-try stmt state return next continue break throw classname)]
+      [(eq? (car stmt) 'finally)    (M-finally stmt state return next continue break throw classname)]
+      [(eq? (caar stmt) 'catch)     (M-catch stmt state return next continue break throw classname)]))
 
 
 ;; Executes a block of statements enclosed by brackets, and returns the state after execution
-(define (M-block stmt-list state return next-outer continue break throw)
+(define (M-block stmt-list state return next-outer continue break throw classname)
     (cond
       [(null? stmt-list)   (next-outer state)]
       [else                (M-block (cdr stmt-list)
                                     (call/cc (lambda (next-inner)
-                                               (M-state (car stmt-list) state return next-inner continue break throw)))
+                                               (M-state (car stmt-list) state return next-inner continue break throw classname)))
                                     return
                                     next-outer
                                     continue
                                     break
-                                    throw)]))
+                                    throw
+                                    classname)]))
 
 
 ; input: a funcall statement, a state before the funcall execution, and two continuations next and throw
 ; output: the state after executing the funcall in stmt
-(define (M-call-state stmt state next throw)
+(define (M-call-state stmt state next throw classname)
     (let* ((closure (get-value (function-name stmt) state clean-return-cont))
            (fstate1 ((closure-environment closure) state))
            (fstate2 (add-layer fstate1))
@@ -354,19 +390,21 @@
                                      (function-args stmt)
                                      fstate2
                                      state
-                                     throw)))
+                                     throw
+                                     classname)))
       (M-block (closure-body closure)
                fstate3
                (lambda (v s) (next state))
                (lambda (s) (next state))
                (lambda (s) (error 'break-not-allowed-outside-loop))
                (lambda (s) (error 'continue-not-allowed-outside-loop))
-               (lambda (v s) (M-throw v state throw)))))
+               (lambda (v s) (M-throw v state throw classname))
+               classname)))
 
 
 ;; Executes a function call and returns the value returned by the function call
 ;;An error is thrown if the function has no return value. 
-(define (M-call-value stmt state get-closure classname throw)
+(define (M-call-value stmt state get-closure throw classname)
     (let* ((closure (get-closure (function-name stmt) state classname))
            (fstate1 ((closure-environment closure) state))
            (fstate2 (add-layer fstate1))
@@ -374,40 +412,56 @@
                                      (function-args stmt)
                                      fstate2
                                      state
-                                     throw)))
+                                     throw
+                                     classname)))
       (call/cc (lambda (return) (M-block (closure-body closure)
                                          fstate3
                                          return
                                          (lambda (s) (error 'return-not-found-when-expected))
                                          (lambda (s) (error 'break-not-allowed-outside-loop))
                                          (lambda (s) (error 'continue-not-allowed-outside-loop))
-                                         (lambda (v s) (M-throw v state throw)))))))
+                                         (lambda (v s) (M-throw v state throw classname))
+                                         classname)))))
 
 
 ;; returns the boolean or integer value that an expression evaluates to
-(define (M-value expr state throw return)
+(define (M-value expr state throw classname return)
     (cond
-      ; handling of assignment expression
+      ; assignment expression
       [(and (list? expr) (eq? (operator expr) '=))         (return (M-assign-value (leftoperand expr)
-                                                                                   (M-value (rightoperand expr) state throw clean-return-cont)
+                                                                                   (M-value (rightoperand expr) state throw classname clean-return-cont)
                                                                                    state
                                                                                    clean-return-cont))]
-      [(and (list? expr) (eq? (operator expr) 'funcall))   (return M-call-value expr state throw)]
+      [(and (list? expr) (eq? (operator expr) 'funcall))   (return (M-call-value expr state get-inst-func-closure throw classname))]
 
-      ; handling instance creation
+      ; instance creation
       [(and (list? expr) (eq? (operator expr) 'new))       (return (make-instance-closure (leftoperand expr) state throw))]
-      [else                                                (let ((bool-output (M-boolean expr state throw clean-return-cont)))
+
+      ; dot operator
+      [(and (list? expr) (eq? (operator expr) 'dot))      (return (M-dot expr state classname))]
+
+      [else                                                (let ((bool-output (M-boolean expr state throw classname clean-return-cont)))
                                                             (if (eq? bool-output 'error)
-                                                                (let ((int-output (M-int expr state throw clean-return-cont)))
+                                                                (let ((int-output (M-int expr state throw classname clean-return-cont)))
                                                                   (if (eq? int-output 'error)
-                                                                      (return (M-inst expr state))
+                                                                      (return (M-inst expr state classname))
                                                                       (return int-output)))
                                                                 (return bool-output)))]))
 
 
+;; obtains the instance field/method from an instance or a class field/method from a valid class
+;; NOTE: this function DOES NOT execute a method, rather it obtains the class closure of the method
+(define (M-dot expr state classname)
+    (let* ((inst (M-inst (leftoperand expr) state classname))
+           (cc-field-names (names (inst-fields (get-value classname state clean-return-cont)))))
+      
+      (idx-of (lookup-fields cc-field-names (rightoperand expr))
+              (values inst))))
+
+
 ;; Takes in a declaration statement that may or may not contain a value. If no value is specified, the variable is bound to 'novalue.
 ;; An error is thrown if a variable has already been declared.
-(define (M-declare stmt state throw)
+(define (M-declare stmt state throw classname)
     (let ((in-local-state (in-local-state? (leftoperand stmt) state clean-return-cont)))
       (cond
         [in-local-state                 (error 'redefining-variable)]
@@ -418,14 +472,14 @@
         [(eq? (car stmt) 'class)        (add-binding (class-name stmt)
                                                      (make-class-closure stmt state throw)
                                                      state)]
-        [else                           (add-binding (leftoperand stmt) (M-value (rightoperand stmt) state throw clean-return-cont) state)])))
+        [else                           (add-binding (leftoperand stmt) (M-value (rightoperand stmt) state throw classname clean-return-cont) state)])))
 
 
 ;; Evaluates an assignment statement. The return value of the assignment ISN'T used, so it is ignored and the new state is returned.
 ;; The new state will  replace the binding on the closest layer in the state
-(define (M-assign stmt state throw)
+(define (M-assign stmt state throw classname)
   (update-value (leftoperand stmt)
-                (M-value (rightoperand stmt) state throw clean-return-cont)
+                (M-value (rightoperand stmt) state throw classname clean-return-cont)
                 state
                 state
                 clean-return-cont))
@@ -443,181 +497,188 @@
 
 ;; Takes in an if-statement that has an optional else block, and executes the branch that is determined by the condition.
 ;; Allows for side effects in the condition statement
-(define (M-if stmt state return next continue break throw)
+(define (M-if stmt state return next continue break throw classname)
        (cond 
-         [(eq? (M-boolean (condition stmt) state throw clean-return-cont) 'true)  (M-state (first-stmt stmt) state return next continue break throw)]
-         [(pair? (else-if stmt))                                            (M-state (second-stmt stmt) state return next continue break throw)]
+         [(eq? (M-boolean (condition stmt) state throw classname clean-return-cont) 'true)  (M-state (first-stmt stmt) state return next continue break throw classname)]
+         [(pair? (else-if stmt))                                            (M-state (second-stmt stmt) state return next continue break throw classname)]
          [else                                                              (next state)]))
 
 
 ;; Takes in a while statement, and executes the loop body repeatedly until condition evaluates to false
 ;; Allows for side effects in the condition statement
-(define (M-while stmt state return next break throw)
+(define (M-while stmt state return next break throw classname)
       (cond
-        [(eq? (M-boolean (condition stmt) state throw clean-return-cont) 'true)  (M-while stmt
-                                                                                    (call/cc (lambda (continue) (M-state (loop-body stmt) state return continue continue break throw)))
-                                                                                    return
-                                                                                    next
-                                                                                    break
-                                                                                    throw)] 
+        [(eq? (M-boolean (condition stmt) state throw classname clean-return-cont) 'true)  (M-while stmt
+                                                                                                    (call/cc (lambda (continue) (M-state (loop-body stmt) state return continue continue break throw classname)))
+                                                                                                    return
+                                                                                                    next
+                                                                                                    break
+                                                                                                    throw
+                                                                                                    classname)] 
         [else                                                              (next state)]))
 
 
 ;; Takes in a throw statement and a callback function that may take 1 or 2 arguments.
 ;; NEED TO COMPLETE
-(define (M-throw expr state throw)
+(define (M-throw expr state throw classname)
   (cond
-    [(eq? (procedure-arity throw) 2)   (throw (M-value expr state throw clean-return-cont)
+    [(eq? (procedure-arity throw) 2)   (throw (M-value expr state throw classname clean-return-cont)
                                                (add-layer (remove-layer state)))]
     [else                              (throw 'exception-thrown-and-not-caught)]))
 
 
 ;; Takes in a return statement and a callback function that may take 1 or 2 arguments.
 ;; NEED TO COMPLETE COMMENT
-(define (M-return expr state return throw)
+(define (M-return expr state return throw classname)
   (cond
-    [(eq? (procedure-arity return) 2)   (return (M-value expr state throw clean-return-cont)
+    [(eq? (procedure-arity return) 2)   (return (M-value expr state throw classname clean-return-cont)
                                                 state)]
-    [else                               (return (M-value expr state throw clean-return-cont))]))
+    [else                               (return (M-value expr state throw classname clean-return-cont))]))
 
 
 ;; Executes the try-block in a try-catch-finally, where the catch and finally blocks are allowed to be omitted.
 ;; has same behavior as Java's try-catch-finally
-(define (M-try stmts state return next continue break throw)
+(define (M-try stmts state return next continue break throw classname)
        ; continuations that define the control flow behavior of try-block
-       (let* ((newreturn          (lambda (s) (M-state (finally-from-try stmts) s return return continue break throw)))
-              (newbreak           (lambda (s) (M-state (finally-from-try stmts) s return break continue break throw)))
-              (newcontinue        (lambda (s) (M-state (finally-from-try stmts) s return continue continue break throw)))
-              (newthrow           (lambda (s) (M-state (finally-from-try stmts) s return throw continue break throw)))
-              (finallycont        (lambda (s) (M-state (finally-from-try stmts) s return next continue break throw)))  ; for complete execution of try block
-              (mythrow1           (lambda (v s) (M-state (catch-and-finally stmts) (add-binding (catch-exception-name stmts) v s) return next continue break throw)))
-              (mythrow2           (lambda (v s) (M-state (catch-and-finally stmts) (add-binding (catch-exception-name stmts) v s) newreturn finallycont newbreak newcontinue newthrow))))
+       (let* ((newreturn          (lambda (s) (M-state (finally-from-try stmts) s return return continue break throw classname)))
+              (newbreak           (lambda (s) (M-state (finally-from-try stmts) s return break continue break throw classname)))
+              (newcontinue        (lambda (s) (M-state (finally-from-try stmts) s return continue continue break throw classname)))
+              (newthrow           (lambda (s) (M-state (finally-from-try stmts) s return throw continue break throw classname)))
+              (finallycont        (lambda (s) (M-state (finally-from-try stmts) s return next continue break throw classname)))  ; for complete execution of try block
+              (mythrow1           (lambda (v s) (M-state (catch-and-finally stmts) (add-binding (catch-exception-name stmts) v s) return next continue break throw classname)))
+              (mythrow2           (lambda (v s) (M-state (catch-and-finally stmts) (add-binding (catch-exception-name stmts) v s) newreturn finallycont newbreak newcontinue newthrow classname))))
          
          (cond
            [(and (null? (catch-only stmts))
-                 (null? (finally-from-try stmts)))       (M-block (try-body stmts) (add-layer state) return next continue break throw)]
-           [(null? (catch-only stmts))                   (M-block (try-body stmts) (add-layer state) newreturn finallycont newcontinue newbreak newthrow)]
-           [(null? (finally-from-try stmts))             (M-block (try-body stmts) (add-layer state) return next continue break mythrow1)]
-           [else                                         (M-block (try-body stmts) (add-layer state) newreturn finallycont newcontinue newbreak mythrow2)])))
+                 (null? (finally-from-try stmts)))       (M-block (try-body stmts) (add-layer state) return next continue break throw classname)]
+           [(null? (catch-only stmts))                   (M-block (try-body stmts) (add-layer state) newreturn finallycont newcontinue newbreak newthrow classname)]
+           [(null? (finally-from-try stmts))             (M-block (try-body stmts) (add-layer state) return next continue break mythrow1 classname)]
+           [else                                         (M-block (try-body stmts) (add-layer state) newreturn finallycont newcontinue newbreak mythrow2 classname)])))
 
 
 ;; Executes the catch-block in a try-catch-finally, where the finally block is allowed to be omitted.
 ;; Flow control behavior for continuations is defined in the "M-try" function
-(define (M-catch stmts state return next break continue throw)
-    (M-block (catch-body stmts) state return next break continue throw))
+(define (M-catch stmts state return next break continue throw classname)
+    (M-block (catch-body stmts) state return next break continue throw classname))
 
 
 ;; Executes the finally-block in a try-catch-finally.
 ;; Flow control behavior for continuations is defined in the "M-try" function
-(define (M-finally stmts state return next break continue throw)
-     (M-block (finally-body stmts) (add-layer state) return next break continue throw))
+(define (M-finally stmts state return next break continue throw classname)
+     (M-block (finally-body stmts) (add-layer state) return next break continue throw classname))
 
 
 ;; Evaluates an expression through the lens of relational operators/booleans. Returns true, false, or error
-(define (M-boolean expr state throw return)
+(define (M-boolean expr state throw classname return)
      (cond
        ; expressions with no operators
        [(or (eq? expr 'true) (eq? expr 'false))   (return expr)]
        [(number? expr)                            (return 'error)]
-       [(atom? expr)                              (M-boolean (get-value expr state clean-return-cont) state throw return)]
-       [(eq? (operator expr) 'funcall)            (M-boolean (M-call-value expr state throw)
+       [(atom? expr)                              (M-boolean (get-value expr state clean-return-cont) state throw classname return)]
+       [(eq? (operator expr) 'funcall)            (M-boolean (M-call-value expr state throw classname)
                                                              state
                                                              throw
+                                                             classname
                                                              return)]
 
        ; unary operators
-       [(eq? (operator expr) '!)         (M-boolean (leftoperand expr) state throw
+       [(eq? (operator expr) '!)         (M-boolean (leftoperand expr) state throw classname
                                            (lambda (v) (return (language-bool (not (eq? v 'true))))))]
        
        ; binary operators
-       [(eq? (operator expr) '&&)        (M-boolean (leftoperand expr) state throw
-                                           (lambda (v-left) (M-boolean (rightoperand expr) state throw
+       [(eq? (operator expr) '&&)        (M-boolean (leftoperand expr) state throw classname
+                                           (lambda (v-left) (M-boolean (rightoperand expr) state throw classname
                                              (lambda (v-right) (return (language-bool (and (eq? v-left 'true) (eq? v-right 'true))))))))]
        
-       [(eq? (operator expr) '||)        (M-boolean (leftoperand expr) state throw
-                                           (lambda (v-left) (M-boolean (rightoperand expr) state throw
+       [(eq? (operator expr) '||)        (M-boolean (leftoperand expr) state throw classname
+                                           (lambda (v-left) (M-boolean (rightoperand expr) state throw classname
                                              (lambda (v-right) (return (language-bool (or (eq? v-left 'true) (eq? v-right 'true))))))))]
        
-       [(eq? (operator expr) '!=)        (M-value (leftoperand expr) state throw
-                                           (lambda (v-left) (M-value (rightoperand expr) state throw
+       [(eq? (operator expr) '!=)        (M-value (leftoperand expr) state throw classname
+                                           (lambda (v-left) (M-value (rightoperand expr) state throw classname
                                              (lambda (v-right) (return (language-bool (not (eq? v-left v-right))))))))]
        
-       [(eq? (operator expr) '==)        (M-value (leftoperand expr) state throw
-                                           (lambda (v-left) (M-value (rightoperand expr) state throw
+       [(eq? (operator expr) '==)        (M-value (leftoperand expr) state throw classname
+                                           (lambda (v-left) (M-value (rightoperand expr) state throw classname
                                              (lambda (v-right) (return (language-bool (eq? v-left v-right)))))))]
        
-       [(eq? (operator expr) '<)         (M-int (leftoperand expr) state throw
-                                           (lambda (v-left) (M-int (rightoperand expr) state throw
+       [(eq? (operator expr) '<)         (M-int (leftoperand expr) state throw classname
+                                           (lambda (v-left) (M-int (rightoperand expr) state throw classname
                                               (lambda (v-right) (return (language-bool (< v-left v-right)))))))]
        
-       [(eq? (operator expr) '<=)        (M-int (leftoperand expr) state throw
-                                           (lambda (v-left) (M-int (rightoperand expr) state throw
+       [(eq? (operator expr) '<=)        (M-int (leftoperand expr) state throw classname
+                                           (lambda (v-left) (M-int (rightoperand expr) state throw classname
                                              (lambda (v-right) (return (language-bool (<= v-left v-right)))))))]
        
-       [(eq? (operator expr) '>)         (M-int (leftoperand expr) state throw
-                                           (lambda (v-left) (M-int (rightoperand expr) state throw
+       [(eq? (operator expr) '>)         (M-int (leftoperand expr) state throw classname
+                                           (lambda (v-left) (M-int (rightoperand expr) state throw classname
                                              (lambda (v-right) (return (language-bool (> v-left v-right)))))))]
        
-       [(eq? (operator expr) '>=)        (M-int (leftoperand expr) state throw
-                                           (lambda (v-left) (M-int (rightoperand expr) state throw
+       [(eq? (operator expr) '>=)        (M-int (leftoperand expr) state throw classname
+                                           (lambda (v-left) (M-int (rightoperand expr) state throw classname
                                              (lambda (v-right) (return (language-bool (>= v-left v-right)))))))]
        
        [(eq? (operator expr) '=)         (return (M-assign-value (leftoperand expr)
-                                                                      (M-value (rightoperand expr) state throw clean-return-cont)
+                                                                      (M-value (rightoperand expr) state throw classname clean-return-cont)
                                                                       state
                                                                       clean-return-cont))]
        [else 'error]))
 
 
 ;; Evaluates an expression through the lens of mathematical operators/integers. Returns an integer or an error.
-(define (M-int expr state throw return)
+(define (M-int expr state throw classname return)
     (cond
+      ; constants
       [(number? expr)                           (return expr)]
       [(or (eq? expr 'true) (eq? expr 'false))  (return 'error)]
-      [(atom? expr)                             (M-int (get-value expr state clean-return-cont) state throw return)]
-      [(eq? (operator expr) 'funcall)           (M-int (M-call-value expr state throw)
+
+      ; variables, fields, and funcalls
+      [(atom? expr)                             (M-int (get-value expr state clean-return-cont) state throw classname return)]
+      [(eq? (operator expr) 'funcall)           (M-int (M-call-value expr state throw classname)
                                                            state
                                                            throw
+                                                           classname
                                                            return)]
+       [(and (list? expr) (eq? (operator expr) 'dot))      (M-int (M-dot expr state classname) state throw classname return)]
       
       [(and (eq? (operator expr) '-)
-            (null? (operands-excluding-first expr)))      (M-int (operand expr) state throw
+            (null? (operands-excluding-first expr)))      (M-int (operand expr) state throw classname
                                                                  (lambda (v) (return (- v))))]
       
-      [(eq? (operator expr) '-)                 (M-int (leftoperand expr) state throw
-                                                  (lambda (v-left) (M-int (rightoperand expr) state throw
+      [(eq? (operator expr) '-)                 (M-int (leftoperand expr) state throw classname
+                                                  (lambda (v-left) (M-int (rightoperand expr) state throw classname
                                                     (lambda (v-right) (return (- v-left v-right))))))]
       
-      [(eq? (operator expr) '+)                 (M-int (leftoperand expr) state throw
-                                                  (lambda (v-left) (M-int (rightoperand expr) state throw
+      [(eq? (operator expr) '+)                 (M-int (leftoperand expr) state throw classname
+                                                  (lambda (v-left) (M-int (rightoperand expr) state throw classname
                                                     (lambda (v-right) (return (+ v-left v-right))))))]
       
-      [(eq? (operator expr) '*)                 (M-int (leftoperand expr) state throw
-                                                  (lambda (v-left) (M-int (rightoperand expr) state throw
+      [(eq? (operator expr) '*)                 (M-int (leftoperand expr) state throw classname
+                                                  (lambda (v-left) (M-int (rightoperand expr) state throw classname
                                                     (lambda (v-right) (return (* v-left v-right))))))]
       
-      [(eq? (operator expr) '/)                (M-int (leftoperand expr) state throw
-                                                  (lambda (v-left) (M-int (rightoperand expr) state throw
+      [(eq? (operator expr) '/)                (M-int (leftoperand expr) state throw classname
+                                                  (lambda (v-left) (M-int (rightoperand expr) state throw classname
                                                     (lambda (v-right) (return (quotient v-left v-right))))))]
        
-      [(eq? (operator expr) '%)                (M-int (leftoperand expr) state throw
-                                                  (lambda (v-left) (M-int (rightoperand expr) state throw
+      [(eq? (operator expr) '%)                (M-int (leftoperand expr) state throw classname
+                                                  (lambda (v-left) (M-int (rightoperand expr) state throw classname
                                                     (lambda (v-right) (return (remainder v-left v-right))))))]
 
        [(eq? (operator expr) '=)         (return (M-assign-value (leftoperand expr)
-                                                                      (M-value (rightoperand expr) state throw clean-return-cont)
+                                                                      (M-value (rightoperand expr) state throw classname clean-return-cont)
                                                                       state
                                                                       clean-return-cont))]
       [else                                    (return 'error)]))
 
 
 ;; Evalutes an expression through the lens of an object. Returns an instance closure or an error.
-(define (M-inst expr state)
+(define (M-inst expr state classname)
     (cond
       [(in-local-state? expr state clean-return-cont)    (get-value expr state clean-return-cont)]
-      [else                            10])) ;(get-inst-value (list 'dot 'this expr)
-                                                       ;state
-                                                       ;classname)]))
+      [else                                              (M-dot (list 'dot 'this expr)
+                                                                         state
+                                                                         classname)]))
 
 
 ; expected output from each of the tests

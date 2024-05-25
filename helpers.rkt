@@ -46,6 +46,10 @@
 (define operator car)
 (define operandlist cdr)
 (define leftoperand cadr)
+(define (func-leftoperand stmt)
+  (cond
+    [(list? (leftoperand stmt))   (rightoperand (leftoperand stmt))]
+    [else                         (leftoperand stmt)]))
 (define operand cadr) ; used for unary operators
 (define operands-excluding-first cddr)
 (define rightoperand caddr)
@@ -120,3 +124,11 @@
 ; for selecting a specific part of method/field bindings
 (define names            car)
 (define values           cadr)
+
+
+
+
+; abstractions for instance closures
+; instance closure
+(define runtime_type    car)
+(define instance_values cadr)
