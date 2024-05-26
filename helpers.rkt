@@ -22,11 +22,22 @@
     [(eq? (car list) item)  #t]
     [else                   (in-list? item (cdr list))]))
 
+;; does the same thing as "unbox" but deals with input that could be 'error
+(define (dereference opt-box)
+  (cond
+    [(eq? opt-box 'error)   opt-box]
+    [else                   (unbox opt-box)]))
+
 ;; the state is stored in the following form
 ;;          ( ((names) (values)) ... )
 ;; so these are abstractions for obtaining certain parts of the state
 (define top-layer car)
 (define remaining-layers cdr)
+(define (class-layer state)
+  (cond
+    [(null? state)                      (error 'cannot-get-class-layer-on-empty-state)]
+    [(null? (remaining-layers state))   state]
+    [else                               (class-layer (remaining-layers state))]))
 (define variable-names (lambda (state) (car (top-layer state))))
 (define variable-values (lambda (state) (cadr (top-layer state))))
 (define front-name (lambda (state) (car (variable-names state))))
@@ -45,11 +56,7 @@
 ;; abstractions for obtaining certain parts of expressions of the following form: (op op1 op2)
 (define operator car)
 (define operandlist cdr)
-(define leftoperand cadr)
-(define (func-leftoperand stmt)
-  (cond
-    [(list? (leftoperand stmt))   (rightoperand (leftoperand stmt))]
-    [else                         (leftoperand stmt)]))
+(define leftoperand cadr) 
 (define operand cadr) ; used for unary operators
 (define operands-excluding-first cddr)
 (define rightoperand caddr)
@@ -130,5 +137,5 @@
 
 ; abstractions for instance closures
 ; instance closure
-(define runtime_type    car)
-(define instance_values cadr)
+(define runtime-type    car)
+(define instance-values cadr)
