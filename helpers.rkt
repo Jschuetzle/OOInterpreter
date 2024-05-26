@@ -96,7 +96,7 @@
 (define closure-params           car)
 (define closure-body             cadr)
 (define closure-environment      caddr)
-(define function-enclosing-class cdddr)
+(define function-enclosing-class cadddr)
 
 
 

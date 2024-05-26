@@ -34,13 +34,13 @@
 
 ;; returns the value associated with some variable in the state. Naming conflicts are handled by the layering of the state, i.e. static
 ;; scoping rules are applied to variable lookups. An error is thrown if variable doesn't exist in state or if the variable hasn't been initialized yet
-(define (get-value var state return)
+(define (get-value var state)
     (cond
       [(null? state)                                                            (error 'using-before-declaring)]
-      [(null? (variable-names state))                                           (get-value var (remaining-layers state) return)]
+      [(null? (variable-names state))                                           (get-value var (remaining-layers state))]
       [(and (eq? (front-name state) var) (eq? 'novalue (front-value state)))    (error 'using-before-assigning)]
-      [(eq? (front-name state) var)                                             (return (unbox (front-value state)))]
-      [else                                                                     (get-value var (remaining-state state) return)]))
+      [(eq? (front-name state) var)                                             (unbox (front-value state))]
+      [else                                                                     (get-value var (remaining-state state))]))
 
 
 ;; returns a reference to some variable in the state, i.e. the box bound to a variable is returned
@@ -146,7 +146,7 @@
 (define (optional-get-cc class state)
   (cond
     [(eq? class 'novalue)   null]
-    [else                  (get-value class state clean-return-cont)]))
+    [else                  (get-value class state)]))
 
 
 ;; obtains the front declaration statement from a list of declarations...used while parsing decs in a class body
@@ -217,7 +217,7 @@
 
 ;; evaluates the default field expressions from some class and returns a list of their values
 (define (get-default-field-values classname state throw)
-  (let ((default-exprs (values (inst-fields-in-cc (get-value classname state clean-return-cont)))))
+  (let ((default-exprs (values (inst-fields-in-cc (get-value classname state)))))
     (reverse (eval-default-exprs default-exprs
                                  state
                                  throw
@@ -235,7 +235,7 @@
 
 ; updates the value of an instance field, given the instance name, field name, and new value
 (define (update-inst inst fieldname value state classname)
-     (let* ((cc-field-names (names (inst-fields-in-cc (get-value classname state clean-return-cont)))))
+     (let* ((cc-field-names (names (inst-fields-in-cc (get-value classname state)))))
        
       (idx-of-update (lookup-fields cc-field-names fieldname)
                      value
@@ -283,7 +283,7 @@
 (define (make-func-closure current-state params body classname)
     (list params
           body
-          (lambda (future-state) (add-binding classname (get-value classname future-state clean-return-cont) current-state))
+          (lambda (future-state) (add-binding classname (get-value classname future-state) current-state))
           classname))
 
 
@@ -319,7 +319,7 @@
 ;; obtains the method closure for a static method. If the static method doesn't exist, it examines the parent class's methods (if applicable).
 ;; If the method doesn't exist at all, an error is thrown.
 (define (get-static-func-closure name state classname)
-    (let ((cc (get-value classname state clean-return-cont)))
+    (let ((cc (get-value classname state)))
       (get-func-closure name
                         (list (static-methods cc))
                         (superclass cc)
@@ -331,7 +331,7 @@
 ;; obtains the method closure for an instance method. If the instance method doesn't exist, it examines the parent class's methods (if applicable).
 ;; If the method doesn't exist at all, an error is thrown.
 (define (get-inst-func-closure name state classname)
-    (let ((cc (get-value classname state clean-return-cont)))
+    (let ((cc (get-value classname state)))
       (get-func-closure name
                         (list (inst-methods cc))
                         (superclass cc)
@@ -355,8 +355,8 @@
     [(and (null? (variable-names funclist)) (eq? super 'novalue))   (error 'invalid-method-called)]
     [(null? (variable-names funclist))                              (get-func-closure name
                                                                                       ;; super's functions are put inside a list so the original state functions can be used
-                                                                                      (list (nextlist (get-value super state clean-return-cont)))
-                                                                                      (superclass (get-value super state clean-return-cont))
+                                                                                      (list (nextlist (get-value super state)))
+                                                                                      (superclass (get-value super state))
                                                                                       state
                                                                                       nextlist
                                                                                       return)]
@@ -431,12 +431,23 @@
                classname)))
 
 
+(define (funcall-execution-location inst-name inst state classname)
+  (cond
+    [(eq? inst-name 'super)   (superclass (get-value classname state))]
+    [(eq? inst 'error)        classname]
+    [else                     (runtime-type inst)]))
+
 ;; Executes a function call and returns the value returned by the function call
 ;;An error is thrown if the function has no return value. 
 (define (M-call-value stmt state throw classname)
     (let* ((inst-closure-ref (M-inst-ref (leftoperand (leftoperand stmt)) state classname throw))
            (get-closure (get-closure-type (dereference inst-closure-ref)))
-           (method-closure (get-closure (M-call-funcname stmt) state classname))
+           (method-closure (get-closure (M-call-funcname stmt)
+                                        state
+                                        (funcall-execution-location (leftoperand (leftoperand stmt))
+                                                                    (dereference inst-closure-ref)
+                                                                    state
+                                                                    classname)))
            (fstate1 ((closure-environment method-closure) state))
            (fstate2 (add-layer fstate1))
            (fstate3 (bind-parameters (closure-params method-closure)
@@ -453,7 +464,7 @@
                                          (lambda (s) (error 'break-not-allowed-outside-loop))
                                          (lambda (s) (error 'continue-not-allowed-outside-loop))
                                          (lambda (v s) (M-throw v state throw classname))
-                                         classname)))))
+                                         (function-enclosing-class method-closure))))))
 
 
 ;; returns the boolean or integer value that an expression evaluates to
@@ -485,7 +496,7 @@
 ;; NOTE: this function DOES NOT execute a method, rather it obtains the class closure of the method
 (define (M-dot expr state classname throw)
     (let* ((inst (M-inst (leftoperand expr) state classname throw))
-           (cc-field-names (names (inst-fields-in-cc (get-value classname state clean-return-cont)))))
+           (cc-field-names (names (inst-fields-in-cc (get-value classname state)))))
       
       (idx-of (lookup-fields cc-field-names (rightoperand expr))
               (values inst))))
@@ -621,7 +632,7 @@
        ; expressions with no operators
        [(or (eq? expr 'true) (eq? expr 'false))   (return expr)]
        [(number? expr)                            (return 'error)]
-       [(and (atom? expr) (in-local-state? expr state))   (M-boolean (get-value expr state clean-return-cont) state throw classname return)]
+       [(and (atom? expr) (in-local-state? expr state))   (M-boolean (get-value expr state) state throw classname return)]
        [(atom? expr)                                      (M-boolean (M-value (list 'dot 'this expr) state throw clean-return-cont classname) state throw return classname)]
        [(eq? (operator expr) 'funcall)            (M-boolean (M-call-value expr state throw classname)
                                                              state
@@ -681,7 +692,7 @@
       [(or (eq? expr 'true) (eq? expr 'false))  (return 'error)]
 
       ; variables, fields, and funcalls
-      [(and (atom? expr) (in-local-state? expr state))   (M-int (get-value expr state clean-return-cont) state throw classname return)]
+      [(and (atom? expr) (in-local-state? expr state))   (M-int (get-value expr state) state throw classname return)]
       [(atom? expr)                                      (M-int (M-value (list 'dot 'this expr) state throw clean-return-cont classname) state throw return classname)]
       [(eq? (operator expr) 'funcall)                    (M-int (M-call-value expr state throw classname)
                                                                 state
@@ -723,15 +734,7 @@
 
 ;; Evalutes an expression through the lens of an object. Returns an instance closure or an error.
 (define (M-inst expr state classname throw)
-    (cond
-      [(and (list? expr) (eq? (car expr) 'funcall))                    (M-call-value expr state throw classname)]
-      [(and (list? expr) (eq? (car expr) 'new))                        (make-instance-closure (leftoperand expr) state throw)]
-      [(is-class? expr (class-layer state))                            'error]
-      [(in-local-state? expr state)                                    (get-value expr state clean-return-cont)]
-      [else                                                            (M-dot (list 'dot 'this expr)
-                                                                              state
-                                                                              classname
-                                                                              throw)]))
+  (dereference (M-inst-ref expr state classname throw)))
 
 
 ;; Evalutes an expression through the lens of an object reference. Returns a box containing an instance closure or an error.
@@ -740,6 +743,7 @@
       [(and (list? expr) (eq? (car expr) 'funcall))                    (M-call-value expr state throw classname)]
       [(and (list? expr) (eq? (car expr) 'new))                        (box (make-instance-closure (leftoperand expr) state throw))]
       [(is-class? expr (class-layer state))                            'error]
+      [(eq? expr 'super)                                               (get-reference 'this state clean-return-cont)]
       [(in-local-state? expr state)                                    (get-reference expr state clean-return-cont)]
       [else                                                            (M-dot (list 'dot 'this expr)
                                                                               state
