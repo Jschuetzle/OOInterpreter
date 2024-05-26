@@ -78,11 +78,11 @@
 
 
 ;; returns true if the variable name exists in the local environment of the state
-(define (in-local-state? var state return)
+(define (in-local-state? var state)
   (cond
-    [(null? (variable-names state))   (return #f)]
-    [(eq? (front-name state) var)     (return #t)]
-    [else                             (in-local-state? var (remaining-state state) return)]))
+    [(null? (variable-names state))   #f]
+    [(eq? (front-name state) var)     #t]
+    [else                             (in-local-state? var (remaining-state state))]))
 
 
 ;; returns true if the variable name exists anywhere in the state
@@ -135,9 +135,10 @@
         [(null? super-cc)   (cons 'novalue method-field-list)]
 
         ; if superclass present, superclass slot is filled and superclass fields are appended to current class field bindings
-        [else              (cons (parent-class stmt) (list (method-bindings method-field-list)
-                                                           (list (append (variable-names (field-bindings method-field-list)) (variable-names (list (inst-fields super-cc))))
-                                                                 (append (variable-values (field-bindings method-field-list)) (variable-values (list (inst-fields super-cc)))))))])))
+        [else              (cons (parent-class stmt) (list static-methods
+                                                           inst-methods
+                                                           (list (append (variable-names (list rev-inst-fields)) (variable-names (list (inst-fields-in-cc super-cc))))
+                                                                 (append (variable-values (list rev-inst-fields)) (variable-values (list (inst-fields-in-cc super-cc)))))))])))
 
 
 ;; gets the class closure of some class name. If the argument has no name, then return null
@@ -216,7 +217,7 @@
 
 ;; evaluates the default field expressions from some class and returns a list of their values
 (define (get-default-field-values classname state throw)
-  (let ((default-exprs (values (inst-fields (get-value classname state clean-return-cont)))))
+  (let ((default-exprs (values (inst-fields-in-cc (get-value classname state clean-return-cont)))))
     (reverse (eval-default-exprs default-exprs
                                  state
                                  throw
@@ -234,7 +235,7 @@
 
 ; updates the value of an instance field, given the instance name, field name, and new value
 (define (update-inst inst fieldname value state classname)
-     (let* ((cc-field-names (names (inst-fields (get-value classname state clean-return-cont)))))
+     (let* ((cc-field-names (names (inst-fields-in-cc (get-value classname state clean-return-cont)))))
        
       (idx-of-update (lookup-fields cc-field-names fieldname)
                      value
@@ -484,7 +485,7 @@
 ;; NOTE: this function DOES NOT execute a method, rather it obtains the class closure of the method
 (define (M-dot expr state classname throw)
     (let* ((inst (M-inst (leftoperand expr) state classname throw))
-           (cc-field-names (names (inst-fields (get-value classname state clean-return-cont)))))
+           (cc-field-names (names (inst-fields-in-cc (get-value classname state clean-return-cont)))))
       
       (idx-of (lookup-fields cc-field-names (rightoperand expr))
               (values inst))))
@@ -498,7 +499,7 @@
 ;; Takes in a declaration statement that may or may not contain a value. If no value is specified, the variable is bound to 'novalue.
 ;; An error is thrown if a variable has already been declared.
 (define (M-declare stmt state throw classname)
-    (let ((in-local-state (in-local-state? (leftoperand stmt) state clean-return-cont)))
+    (let ((in-local-state (in-local-state? (leftoperand stmt) state)))
       (cond
         [in-local-state                 (error 'redefining-variable)]
         [(null? (var-dec-value stmt))   (add-binding (leftoperand stmt) 'novalue state)]
@@ -620,7 +621,8 @@
        ; expressions with no operators
        [(or (eq? expr 'true) (eq? expr 'false))   (return expr)]
        [(number? expr)                            (return 'error)]
-       [(atom? expr)                              (M-boolean (get-value expr state clean-return-cont) state throw classname return)]
+       [(and (atom? expr) (in-local-state? expr state))   (M-boolean (get-value expr state clean-return-cont) state throw classname return)]
+       [(atom? expr)                                      (M-boolean (M-value (list 'dot 'this expr) state throw clean-return-cont classname) state throw return classname)]
        [(eq? (operator expr) 'funcall)            (M-boolean (M-call-value expr state throw classname)
                                                              state
                                                              throw
@@ -679,17 +681,18 @@
       [(or (eq? expr 'true) (eq? expr 'false))  (return 'error)]
 
       ; variables, fields, and funcalls
-      [(atom? expr)                             (M-int (get-value expr state clean-return-cont) state throw classname return)]
-      [(eq? (operator expr) 'funcall)           (M-int (M-call-value expr state throw classname)
-                                                           state
-                                                           throw
-                                                           classname
-                                                           return)]
-       [(and (list? expr) (eq? (operator expr) 'dot))      (M-int (M-dot expr state classname throw) state throw classname return)]
+      [(and (atom? expr) (in-local-state? expr state))   (M-int (get-value expr state clean-return-cont) state throw classname return)]
+      [(atom? expr)                                      (M-int (M-value (list 'dot 'this expr) state throw clean-return-cont classname) state throw return classname)]
+      [(eq? (operator expr) 'funcall)                    (M-int (M-call-value expr state throw classname)
+                                                                state
+                                                                throw
+                                                                classname
+                                                                return)]
+       [(and (list? expr) (eq? (operator expr) 'dot))    (M-int (M-dot expr state classname throw) state throw classname return)]
       
       [(and (eq? (operator expr) '-)
-            (null? (operands-excluding-first expr)))      (M-int (operand expr) state throw classname
-                                                                 (lambda (v) (return (- v))))]
+            (null? (operands-excluding-first expr)))     (M-int (operand expr) state throw classname
+                                                                (lambda (v) (return (- v))))]
       
       [(eq? (operator expr) '-)                 (M-int (leftoperand expr) state throw classname
                                                   (lambda (v-left) (M-int (rightoperand expr) state throw classname
@@ -724,7 +727,7 @@
       [(and (list? expr) (eq? (car expr) 'funcall))                    (M-call-value expr state throw classname)]
       [(and (list? expr) (eq? (car expr) 'new))                        (make-instance-closure (leftoperand expr) state throw)]
       [(is-class? expr (class-layer state))                            'error]
-      [(in-local-state? expr state clean-return-cont)                  (get-value expr state clean-return-cont)]
+      [(in-local-state? expr state)                                    (get-value expr state clean-return-cont)]
       [else                                                            (M-dot (list 'dot 'this expr)
                                                                               state
                                                                               classname
@@ -737,7 +740,7 @@
       [(and (list? expr) (eq? (car expr) 'funcall))                    (M-call-value expr state throw classname)]
       [(and (list? expr) (eq? (car expr) 'new))                        (box (make-instance-closure (leftoperand expr) state throw))]
       [(is-class? expr (class-layer state))                            'error]
-      [(in-local-state? expr state clean-return-cont)                  (get-reference expr state clean-return-cont)]
+      [(in-local-state? expr state)                                    (get-reference expr state clean-return-cont)]
       [else                                                            (M-dot (list 'dot 'this expr)
                                                                               state
                                                                               classname
@@ -786,5 +789,5 @@
 (define expected-main
   (lambda (list test-number)
     (cond
-      [(zero? test-number) (car list)]
+      [(zero? (- test-number 1)) (car list)]
       (else (expected-main (cdr list) (- test-number 1))))))

@@ -118,15 +118,12 @@
 (define method-formal-params caddar)
 (define method-def-body         (lambda (stmt) (car (cdddar stmt))))
 
-; used only for the "method-field-list" that the "make-class-closure" function generates
-(define method-bindings car) 
-(define field-bindings  cdr)
 
 ; class closure abstractions
 (define superclass       car)
 (define static-methods   cadr)
 (define inst-methods     caddr)
-(define inst-fields      cadddr)
+(define inst-fields-in-cc      cadddr)
 
 ; for selecting a specific part of method/field bindings
 (define names            car)
