@@ -19,7 +19,7 @@
 ;; Hoisting is NOT implemented, therefore the main function must be at the bottom of the program.
 (define (interpret-program tree state classname return)
     (cond
-      [(null? tree)   (return (M-call-value (list 'funcall (list 'dot classname 'main))  ; execution of main
+      [(null? tree)   (return (M-call-value (list 'funcall (create-dot-syntax classname 'main))  ; execution of main
                                             state
                                             (lambda (s) (error 'exception-thrown))
                                             classname))]
@@ -171,7 +171,7 @@
                                                                                    classname
                                                                                    (cdr tree)
                                                                                    (lambda (v) (return (list (list (cons (leftoperand declaration) (variable-names v))
-                                                                                                                   (cons (rightoperand declaration) (variable-values v)))))))]
+                                                                                                                   (opt-add-rightoperand declaration (variable-values v)))))))]
       
       [(and (eq? (operator declaration) stmt-type)
             (in-list? stmt-type '(function static-function)))    (parse-class-body stmt-type
@@ -190,12 +190,6 @@
                                                                                   (cdr tree)
                                                                                   return)])))
 
-;; ; will add the implicit "this" to formal parameters only if non static
-;; (define add-implicit-for-nonstatic
-;;   (lambda (func-name params)
-;;     (cond
-;;       ((eq? func-name 'main) params)
-;;       (else (append params (list 'this))))))  ; have to add to back of params in order for "restore-state" to function correctl
 
 ;; takes in a list of formal parameters and appends the implicit "this" onto the list only if the stmt type isn't a static function
 (define (add-implicit-this static-type paramlist)
@@ -283,8 +277,20 @@
 (define (make-func-closure current-state params body classname)
     (list params
           body
-          (lambda (future-state) (add-binding classname (get-value classname future-state) current-state))
+          ; (lambda (future-state) (add-binding classname (get-value classname future-state) current-state))
+          (lambda (future-state) (preserve-classes current-state (class-layer future-state) clean-return-cont))
           classname))
+
+
+;; when creating the active environment for some function call, classes currently aren't getting hoisted
+;; this method will take in a state and replace the highest layer with a complete class layer
+(define (preserve-classes state new-layer return)
+  (cond
+    [(null? state)                      (error 'error-obtaining-function-environment)]
+    [(null? (remaining-layers state))   (return new-layer)]
+    [else                                       (preserve-classes (remaining-layers state)
+                                                                  new-layer
+                                                                  (lambda (v) (return (cons (top-layer state) v))))]))
 
 
 ;; Takes a list of formal parameters and list of associated argument expressions, evaluates the argument expressions, and
@@ -318,27 +324,24 @@
 
 ;; obtains the method closure for a static method. If the static method doesn't exist, it examines the parent class's methods (if applicable).
 ;; If the method doesn't exist at all, an error is thrown.
-(define (get-static-func-closure name state classname)
-    (let ((cc (get-value classname state)))
-      (get-func-closure name
-                        (list (static-methods cc))
-                        (superclass cc)
-                        state
-                        static-methods
-                        clean-return-cont)))
+(define (get-static-func-closure name state cc)
+  (get-func-closure name
+                    (list (static-methods cc))
+                    (superclass cc)
+                    state
+                    static-methods
+                    clean-return-cont))
 
 
 ;; obtains the method closure for an instance method. If the instance method doesn't exist, it examines the parent class's methods (if applicable).
 ;; If the method doesn't exist at all, an error is thrown.
-(define (get-inst-func-closure name state classname)
-    (let ((cc (get-value classname state)))
-      (get-func-closure name
-                        (list (inst-methods cc))
-                        (superclass cc)
-                        state
-                        inst-methods
-                        clean-return-cont)))
-
+(define (get-inst-func-closure name state cc)
+  (get-func-closure name
+                    (list (inst-methods cc))
+                    (superclass cc)
+                    state
+                    inst-methods
+                    clean-return-cont))
 
 ;; returns either the "get-static-func-closure" function or "get-inst-func-closure" function based on if the input is error
 (define (get-closure-type inst-output)
@@ -352,7 +355,7 @@
 ;; nextlist is a function that correctly obtains the function list of the super class (since it may be the static or inst functions).
 (define (get-func-closure name funclist super state nextlist return)
   (cond
-    [(and (null? (variable-names funclist)) (eq? super 'novalue))   (error 'invalid-method-called)]
+    [(and (null? (variable-names funclist)) (eq? super 'novalue))   (return 'error)]
     [(null? (variable-names funclist))                              (get-func-closure name
                                                                                       ;; super's functions are put inside a list so the original state functions can be used
                                                                                       (list (nextlist (get-value super state)))
@@ -372,21 +375,21 @@
 ;; Returns the state after the mapping function is applied
 (define (M-state stmt state return next continue break throw classname)
     (cond
-      [(eq? (car stmt) 'class)      (M-declare stmt state throw classname)]
-      [(eq? (car stmt) 'var)        (M-declare stmt state throw classname)]
-      [(eq? (car stmt) '=)          (M-assign stmt state throw classname)]
-      [(eq? (car stmt) 'return)     (M-return (leftoperand stmt) state return throw classname)]
-      [(eq? (car stmt) 'begin)      (M-block (cdr stmt) (add-layer state) return next continue break throw classname)]
-      [(eq? (car stmt) 'function)   (M-declare stmt state throw classname)]
-      [(eq? (car stmt) 'funcall)    (M-call-state stmt state next throw classname)]
-      [(eq? (car stmt) 'if)         (M-if stmt state return next continue break throw classname)]
-      [(eq? (car stmt) 'while)      (M-while stmt state return next next throw classname)]
-      [(eq? (car stmt) 'continue)   (continue (remove-layer state))]
-      [(eq? (car stmt) 'break)      (break (remove-layer state))]
-      [(eq? (car stmt) 'throw)      (M-throw (leftoperand stmt) state throw classname)]
-      [(eq? (car stmt) 'try)        (M-try stmt state return next continue break throw classname)]
-      [(eq? (car stmt) 'finally)    (M-finally stmt state return next continue break throw classname)]
-      [(eq? (caar stmt) 'catch)     (M-catch stmt state return next continue break throw classname)]))
+      [(or (eq? (car stmt) 'class)
+           (eq? (car stmt) 'var)
+           (eq? (car stmt) 'function))   (M-declare stmt state throw classname)]
+      [(eq? (car stmt) '=)               (M-assign stmt state throw classname)]
+      [(eq? (car stmt) 'begin)           (M-block (cdr stmt) (add-layer state) return next continue break throw classname)]
+      [(eq? (car stmt) 'funcall)         (M-call-state stmt state next throw classname)]
+      [(eq? (car stmt) 'if)              (M-if stmt state return next continue break throw classname)]
+      [(eq? (car stmt) 'while)           (M-while stmt state return next next throw classname)]
+      [(eq? (car stmt) 'return)          (M-return (leftoperand stmt) state return throw classname)]
+      [(eq? (car stmt) 'continue)        (continue (remove-layer state))]
+      [(eq? (car stmt) 'break)           (break (remove-layer state))]
+      [(eq? (car stmt) 'throw)           (M-throw (leftoperand stmt) state throw classname)]
+      [(eq? (car stmt) 'try)             (M-try stmt state return next continue break throw classname)]
+      [(eq? (car stmt) 'finally)         (M-finally stmt state return next continue break throw classname)]
+      [(eq? (caar stmt) 'catch)          (M-catch stmt state return next continue break throw classname)]))
 
 
 ;; Executes a block of statements enclosed by brackets, and returns the state after execution
@@ -394,8 +397,7 @@
     (cond
       [(null? stmt-list)   (next-outer state)]
       [else                (M-block (cdr stmt-list)
-                                    (call/cc (lambda (next-inner)
-                                               (M-state (car stmt-list) state return next-inner continue break throw classname)))
+                                    (call/cc (lambda (next-inner) (M-state (car stmt-list) state return next-inner continue break throw classname)))
                                     return
                                     next-outer
                                     continue
@@ -406,12 +408,12 @@
 
 ; input: a funcall statement, a state before the funcall execution, and two continuations next and throw
 ; output: the state after executing the funcall in stmt
-
-; NOTE: I added the get-closure parameter but didn't change it in the places where M-call-state is invoked...for future reference
 (define (M-call-state stmt state next throw classname)
-    (let* ((inst-closure-ref (M-inst-ref (leftoperand (leftoperand stmt)) state classname throw))
-           (get-closure (get-closure-type (dereference inst-closure-ref)))
-           (method-closure (get-closure (M-call-funcname stmt) state classname))
+    (let* ((dot-syntax (ensure-dot-syntax (leftoperand stmt)))
+           (inst-closure-ref (M-inst-ref (leftoperand dot-syntax) state classname throw))
+           ;(get-closure (get-closure-type (dereference inst-closure-ref)))
+           ;(method-closure (get-closure (M-call-funcname stmt) state (get-value classname state clean-return-cont)))
+           (method-closure (M-dot dot-syntax state classname throw))
            (fstate1 ((closure-environment method-closure) state))
            (fstate2 (add-layer fstate1))
            (fstate3 (bind-parameters (closure-params method-closure)
@@ -431,23 +433,36 @@
                classname)))
 
 
+;; determines what class a function call should occur in based on the instance that is used
 (define (funcall-execution-location inst-name inst state classname)
   (cond
     [(eq? inst-name 'super)   (superclass (get-value classname state))]
     [(eq? inst 'error)        classname]
     [else                     (runtime-type inst)]))
 
+;; determines what class a field lookup should first occur in based on the instance that is used
+(define (field-lookup-location inst-name inst state classname)
+  (cond
+    [(eq? inst-name 'super)   (superclass (get-value classname state))]
+    [(eq? inst-name 'this)    classname]
+    [(eq? inst 'error)        classname]
+    [else                     (runtime-type inst)]))
+
+
+;; takes in some identifier and ensures that it is in a dot syntax. Essentially, it adds the implicit 'this' if not already present
+(define (ensure-dot-syntax expr)
+  (cond
+    [(and (list? expr) (eq? (operator expr) 'dot))   expr]
+    [else                                            (create-dot-syntax 'this expr)]))
+
 ;; Executes a function call and returns the value returned by the function call
 ;;An error is thrown if the function has no return value. 
 (define (M-call-value stmt state throw classname)
-    (let* ((inst-closure-ref (M-inst-ref (leftoperand (leftoperand stmt)) state classname throw))
-           (get-closure (get-closure-type (dereference inst-closure-ref)))
-           (method-closure (get-closure (M-call-funcname stmt)
-                                        state
-                                        (funcall-execution-location (leftoperand (leftoperand stmt))
-                                                                    (dereference inst-closure-ref)
-                                                                    state
-                                                                    classname)))
+    (let* ((dot-syntax (ensure-dot-syntax (leftoperand stmt)))
+           (inst-closure-ref (M-inst-ref (leftoperand dot-syntax) state classname throw))
+           ;(get-closure (get-closure-type (dereference inst-closure-ref)))
+           ;(method-closure (get-closure (M-call-funcname stmt) state (get-value classname state clean-return-cont)))
+           (method-closure (M-dot dot-syntax state classname throw))
            (fstate1 ((closure-environment method-closure) state))
            (fstate2 (add-layer fstate1))
            (fstate3 (bind-parameters (closure-params method-closure)
@@ -481,13 +496,17 @@
       [(and (list? expr) (eq? (operator expr) 'new))       (return (make-instance-closure (leftoperand expr) state throw))]
 
       ; dot operator
-      [(and (list? expr) (eq? (operator expr) 'dot))      (return (M-dot expr state classname throw))]
+      [(and (list? expr) (eq? (operator expr) 'dot))       (return (M-dot expr state classname throw))]
 
+      [(eq? expr 'novalue)                                 (return 'novalue)]
       [else                                                (let ((bool-output (M-boolean expr state throw classname clean-return-cont)))
                                                             (if (eq? bool-output 'error)
                                                                 (let ((int-output (M-int expr state throw classname clean-return-cont)))
                                                                   (if (eq? int-output 'error)
-                                                                      (return (M-inst expr state classname throw))
+                                                                      (let ((class-output (M-class expr state throw)))
+                                                                        (if (eq? class-output 'error)
+                                                                            (return (M-inst expr state classname throw))
+                                                                            (return class-output)))
                                                                       (return int-output)))
                                                                 (return bool-output)))]))
 
@@ -495,17 +514,27 @@
 ;; obtains the instance field/method from an instance or a class field/method from a valid class
 ;; NOTE: this function DOES NOT execute a method, rather it obtains the class closure of the method
 (define (M-dot expr state classname throw)
-    (let* ((inst (M-inst (leftoperand expr) state classname throw))
-           (cc-field-names (names (inst-fields-in-cc (get-value classname state)))))
+    (let* ((reference-closure   (M-value (leftoperand expr) state throw classname clean-return-cont))      
+           (identifier          (rightoperand expr)))
+           ;(cc-field-names (names (inst-fields-in-cc (get-value classname state))))
+           ;(inst           (M-inst (leftoperand expr) state classname throw)))
+      (cond
+        [(eq? (length reference-closure) 4)   (get-static-func-closure identifier state reference-closure)]
+        [else                                 (let ((func-closure (get-inst-func-closure identifier
+                                                                                         state
+                                                                                         (get-value (funcall-execution-location (leftoperand expr)
+                                                                                                                                reference-closure
+                                                                                                                                state
+                                                                                                                                classname)
+                                                                                                    state))))
+                                                (if (eq? func-closure 'error)
+                                                    (idx-of (lookup-fields (names (inst-fields-in-cc (get-value (field-lookup-location (leftoperand expr) reference-closure state classname)
+                                                                                                                state)))
+                                                                           identifier)
+                                                            (instance-values reference-closure))
+                                                    func-closure))])))
       
-      (idx-of (lookup-fields cc-field-names (rightoperand expr))
-              (values inst))))
-
-
-;; returns the function name being called in some funcall syntax, with possible nested dot operators
-(define (M-call-funcname stmt)
-  (rightoperand (leftoperand stmt)))
-
+      
 
 ;; Takes in a declaration statement that may or may not contain a value. If no value is specified, the variable is bound to 'novalue.
 ;; An error is thrown if a variable has already been declared.
@@ -528,19 +557,23 @@
 (define (M-assign stmt state throw classname)
   (cond
     ; this condition does not work when we update static vars b/c M-inst is error
-    [(list? (leftoperand stmt))  (update-value (leftoperand (leftoperand stmt))   ;; this is problematic b/c dot operator nesting
-                                               (list (runtime-type (M-inst (leftoperand (leftoperand stmt)) state classname throw))
-                                                     (update-inst (M-inst (leftoperand (leftoperand stmt)) state classname throw)
-                                                                  (rightoperand stmt)
-                                                                  (M-value (rightoperand stmt) state throw classname clean-return-cont)
-                                                                  state classname))
-                                               state state clean-return-cont)]
-    
-  [else                          (update-value (leftoperand stmt)
-                                               (M-value (rightoperand stmt) state throw classname clean-return-cont)
-                                               state
-                                               state
-                                               clean-return-cont)]))
+    [(list? (leftoperand stmt))  (let* ((inst-name (leftoperand (leftoperand stmt)))   ;; this is problematic b/c dot operator nesting
+                                        (inst (M-inst inst-name state classname throw)))
+                                   (update-value inst-name
+                                                 (list (runtime-type inst)
+                                                       (update-inst inst
+                                                                    (rightoperand (leftoperand stmt))
+                                                                    (M-value (rightoperand stmt) state throw classname clean-return-cont)
+                                                                    state
+                                                                    (field-lookup-location inst-name inst state classname)))
+                                                 state state clean-return-cont))]
+                                                                     
+  [(in-local-state? (leftoperand stmt) state)   (update-value (leftoperand stmt)
+                                                              (M-value (rightoperand stmt) state throw classname clean-return-cont)
+                                                              state
+                                                              state
+                                                              clean-return-cont)]
+  [else                                         (M-assign (list '= (create-dot-syntax 'this (leftoperand stmt)) (rightoperand stmt)) state throw classname)]))
 
 
 ;; Evaluates an assignment expression. The return value of the assignment IS used, so the variable reference is updated and the value is returned
@@ -631,9 +664,11 @@
      (cond
        ; expressions with no operators
        [(or (eq? expr 'true) (eq? expr 'false))   (return expr)]
-       [(number? expr)                            (return 'error)]
+       [(or (number? expr)
+            (eq? expr 'this)
+            (eq? expr 'super))                    (return 'error)]
        [(and (atom? expr) (in-local-state? expr state))   (M-boolean (get-value expr state) state throw classname return)]
-       [(atom? expr)                                      (M-boolean (M-value (list 'dot 'this expr) state throw clean-return-cont classname) state throw return classname)]
+       [(atom? expr)                                      (M-boolean (M-value (create-dot-syntax 'this expr) state throw classname clean-return-cont) state throw classname return)]
        [(eq? (operator expr) 'funcall)            (M-boolean (M-call-value expr state throw classname)
                                                              state
                                                              throw
@@ -689,11 +724,14 @@
     (cond
       ; constants
       [(number? expr)                           (return expr)]
-      [(or (eq? expr 'true) (eq? expr 'false))  (return 'error)]
+      [(or (eq? expr 'true)
+           (eq? expr 'false)
+           (eq? expr 'this)
+           (eq? expr 'super))                   (return 'error)]
 
       ; variables, fields, and funcalls
       [(and (atom? expr) (in-local-state? expr state))   (M-int (get-value expr state) state throw classname return)]
-      [(atom? expr)                                      (M-int (M-value (list 'dot 'this expr) state throw clean-return-cont classname) state throw return classname)]
+      [(atom? expr)                                      (M-int (M-value (create-dot-syntax 'this expr) state throw classname clean-return-cont) state throw classname return)]
       [(eq? (operator expr) 'funcall)                    (M-int (M-call-value expr state throw classname)
                                                                 state
                                                                 throw
@@ -732,6 +770,19 @@
       [else                                    (return 'error)]))
 
 
+;; Evaluates an expression through the lens of a class. Returns a class closure or an error.
+(define (M-class expr state throw)
+  (dereference (M-class-ref expr state throw)))
+
+;; Evaluates an expression through the lens of a class. Returns a box containing a class closure or an error.
+(define (M-class-ref expr state throw)
+  (cond
+    [(and (list? expr) (eq? (car expr) 'class))   (box (make-class-closure expr state throw))]
+    [(not (is-class? expr (class-layer state)))   'error]
+    [else                                         (get-reference expr (class-layer state) clean-return-cont)]))
+    
+
+
 ;; Evalutes an expression through the lens of an object. Returns an instance closure or an error.
 (define (M-inst expr state classname throw)
   (dereference (M-inst-ref expr state classname throw)))
@@ -742,10 +793,14 @@
     (cond
       [(and (list? expr) (eq? (car expr) 'funcall))                    (M-call-value expr state throw classname)]
       [(and (list? expr) (eq? (car expr) 'new))                        (box (make-instance-closure (leftoperand expr) state throw))]
+
+      ; VERIFY...is there ever a case where I'm passing in a class into this function?
       [(is-class? expr (class-layer state))                            'error]
       [(eq? expr 'super)                                               (get-reference 'this state clean-return-cont)]
       [(in-local-state? expr state)                                    (get-reference expr state clean-return-cont)]
-      [else                                                            (M-dot (list 'dot 'this expr)
+
+      ; this case doesn't work correctly, bc M-dot doesn't return an instance...
+      [else                                                            (M-dot (create-dot-syntax 'this expr)
                                                                               state
                                                                               classname
                                                                               throw)]))

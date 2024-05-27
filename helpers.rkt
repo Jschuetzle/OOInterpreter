@@ -33,11 +33,14 @@
 ;; so these are abstractions for obtaining certain parts of the state
 (define top-layer car)
 (define remaining-layers cdr)
+
+;; strips everything  but the global layer of a state
 (define (class-layer state)
   (cond
     [(null? state)                      (error 'cannot-get-class-layer-on-empty-state)]
     [(null? (remaining-layers state))   state]
     [else                               (class-layer (remaining-layers state))]))
+
 (define variable-names (lambda (state) (car (top-layer state))))
 (define variable-values (lambda (state) (cadr (top-layer state))))
 (define front-name (lambda (state) (car (variable-names state))))
@@ -60,6 +63,12 @@
 (define operand cadr) ; used for unary operators
 (define operands-excluding-first cddr)
 (define rightoperand caddr)
+
+; used while processing variable decs in class bodies...needed because we can't add to the program state b/c we are making a custom class state
+(define (opt-add-rightoperand stmt list)
+  (cond
+    [(null? (operands-excluding-first stmt))   (cons 'novalue list)]
+    [else                                      (cons (rightoperand stmt) list)]))
 
 
 ; abstractions for stmts
@@ -136,3 +145,8 @@
 ; instance closure
 (define runtime-type    car)
 (define instance-values cadr)
+
+
+; adds the implicit 'this' onto an identifier
+(define (create-dot-syntax ref-name identifier)
+  (list 'dot ref-name identifier))
