@@ -43,7 +43,7 @@ class List {
   static function main() {
     var l = new List();
     l.setVal(1);
-    l.makeList(5);
+    l.makeList(1);
     l = l.reverse();
 
     var result = 0;
